@@ -61,6 +61,7 @@ def get_channel(freq):
 
     return "Unknown"
 
+
 def signal_quality(dbm):
     quality = 2 * (dbm + 100)
 
@@ -72,11 +73,13 @@ def signal_quality(dbm):
 
     return quality
 
+
 def scan():
 
     results = checknetwork.scan_network()
-      
-    filtered = {}
+
+    # Store networks by BSSID (unique MAC address)
+    networks_by_bssid = {}
 
     for network in results:
 
@@ -95,30 +98,27 @@ def scan():
         channel = get_channel(freq)
 
         bssid = network.bssid
-        
+
         quality = signal_quality(network.signal)
 
-        # Store all network information in one dictionary      
+        # Store all network information in one dictionary
         network_info = {
-               "ssid": ssid,
-               "bssid": bssid,
-               "signal": network.signal,
-               "quality": quality,
-               "encryption": encryption,
-               "frequency": freq,
-               "band": band,
-               "channel": channel
+            "ssid": ssid,
+            "bssid": bssid,
+            "signal": network.signal,
+            "quality": quality,
+            "encryption": encryption,
+            "frequency": freq,
+            "band": band,
+            "channel": channel
         }
 
-        # If this SSID is new, store it
-        if ssid not in filtered:
-            filtered[ssid] = network_info
+        # Store each BSSID only once
+        if bssid not in networks_by_bssid:
+            networks_by_bssid[bssid] = network_info
 
-        # If we've already seen this SSID, keep the stronger signal
-        elif network.signal > filtered[ssid]["signal"]:
-            filtered[ssid] = network_info
+        # If the same BSSID appears again, keep the stronger signal
+        elif network.signal > networks_by_bssid[bssid]["signal"]:
+            networks_by_bssid[bssid] = network_info
 
-    return list(filtered.values())
-
-
-networks = scan()
+    return list(networks_by_bssid.values())

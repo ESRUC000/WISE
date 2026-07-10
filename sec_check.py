@@ -19,10 +19,10 @@ def get_security_status(encryption):
 def get_security_message(status):
 
     if status == "Very Secure":
-        return "This network uses the latest security standard."
-
+        return "This network uses the latest security standard." 
+          
     elif status == "Secure":
-        return "This network is protected with modern encryption."
+        return "This network is protected with modern encryption." 
 
     elif status == "Weak":
         return "This network uses an older security protocol."
@@ -33,11 +33,15 @@ def get_security_message(status):
     return "Security could not be determined."
 
 
+    
+
 def analyze(network):
 
     status = get_security_status(network["encryption"])
 
     network["security_status"] = status
     network["security_message"] = get_security_message(status)
+    
+
 
     return network
