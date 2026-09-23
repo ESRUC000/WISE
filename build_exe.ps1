@@ -7,6 +7,7 @@ py -m pip install -r requirements-build.txt
 
 py -m PyInstaller --noconfirm --clean --onefile --windowed `
     --name WISE `
+    --add-data "data\wise_scans.db;data" `
     --collect-submodules pywifi `
     app.py
 

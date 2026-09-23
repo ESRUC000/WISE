@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 from contextlib import closing
@@ -18,6 +19,13 @@ else:
     DATABASE_PATH = Path(__file__).with_name("wise_scans.db")
 
 
+def _database_template_path():
+    if getattr(sys, "frozen", False):
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        return bundle_root / "data" / "wise_scans.db"
+    return Path(__file__).with_name("data") / "wise_scans.db"
+
+
 def _connect():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
@@ -27,6 +35,10 @@ def _connect():
 
 
 def initialize_database():
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    template_path = _database_template_path()
+    if not DATABASE_PATH.exists() and template_path.is_file():
+        shutil.copyfile(template_path, DATABASE_PATH)
     with closing(_connect()) as connection, connection:
         connection.execute(
             """CREATE TABLE IF NOT EXISTS scans (
