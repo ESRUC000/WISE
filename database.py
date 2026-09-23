@@ -1,6 +1,5 @@
 """SQLite persistence for connected-network security score history."""
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -14,12 +13,9 @@ if getattr(sys, "frozen", False):
     app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     DATABASE_PATH = app_data / "WISE" / "wise_scans.db"
 else:
-    # Keep scan history out of the repository. A per-checkout folder also stops
-    # separate clones from accidentally sharing records on the same computer.
-    app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    checkout = str(Path(__file__).resolve().parent).casefold().encode("utf-8")
-    checkout_id = hashlib.sha256(checkout).hexdigest()[:12]
-    DATABASE_PATH = app_data / "WISE" / f"source-{checkout_id}" / "wise_scans.db"
+    # Keep source-run history with this checkout. The database is ignored by Git,
+    # so a fresh clone starts empty while rescans in this checkout remain saved.
+    DATABASE_PATH = Path(__file__).with_name("wise_scans.db")
 
 
 def _connect():

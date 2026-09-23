@@ -12,7 +12,7 @@ The score breakdown appears in the dashboard. A scan is saved automatically; sub
 
 ## Scan history and privacy
 
-Scan history is stored locally in a SQLite database on the computer running WISE. It is not sent to GitHub by the app. The database may contain Wi-Fi network names and scan details, so do not upload or share it publicly. Git ignores SQLite database and journal files by default. In source mode, each checkout stores its history in a separate folder under `%LOCALAPPDATA%\\WISE`; the packaged executable uses `%LOCALAPPDATA%\\WISE\\wise_scans.db`. Existing databases beside the source files are not imported.
+Scan history is stored locally in a SQLite database on the computer running WISE. It is not sent to GitHub by the app. The database may contain Wi-Fi network names and scan details, so do not upload or share it publicly. Git ignores SQLite database and journal files by default. In source mode, each checkout stores history in `wise_scans.db` beside the app; a fresh clone starts without that ignored file. The packaged executable stores history in `%LOCALAPPDATA%\\WISE\\wise_scans.db`.
 
 ## Run the app
 
@@ -29,7 +29,7 @@ Scan history is stored locally in a SQLite database on the computer running WISE
    py app.py
    ```
 
-WISE reads the connected interface with Windows `netsh wlan show interfaces`. A local SQLite database is created on first launch. `database.py` exposes functions to save, list, retrieve, and delete assessments.
+WISE reads the connected interface with Windows `netsh wlan show interfaces`. The `wise_scans.db` SQLite file is created alongside the app on first launch. `database.py` exposes functions to save, list, retrieve, and delete assessments.
 
 ## Build a Windows executable
 
