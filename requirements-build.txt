@@ -1,0 +1,2 @@
+# Build dependencies for creating the Windows desktop executable.
+PyInstaller==6.22.3
