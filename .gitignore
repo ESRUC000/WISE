@@ -3,3 +3,12 @@ __pycache__/
 .venv/
 venv/
 .env
+# Local scan history and SQLite journal/sidecar files can contain network details.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+build/
+dist/
+WISE.spec
+WISE-Debug.spec
