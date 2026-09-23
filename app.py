@@ -1,5 +1,6 @@
 """Modern Tkinter desktop interface for WISE Wi-Fi security scoring."""
 
+import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -47,9 +48,13 @@ class WiseApp(tk.Tk):
         self.score_ring_value = 0
         self.score_rows = {}
         self.nav_buttons = {}
-        self.analyzed_network = None
-        self.environment = None
+        self.viewing_saved_scan = False
+        self.details_source_var = tk.StringVar(value="CURRENT INTERFACE + ANALYZER")
         self.scan_session = 0
+        self.scan_events = queue.Queue()
+        self.scan_poll_id = None
+        self.bar_animation_ids = []
+        self.closing = False
 
         self.database_start_error = None
         try:
@@ -63,6 +68,8 @@ class WiseApp(tk.Tk):
         self._build_history()
         self.show_page("dashboard")
         self.refresh_history()
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
+        self.scan_poll_id = self.after(60, self._process_scan_events)
         if self.database_start_error:
             self.status_var.set(f"History database unavailable: {self.database_start_error}")
 
@@ -264,7 +271,7 @@ class WiseApp(tk.Tk):
         details_heading.pack(fill="x", pady=(0, 10))
         tk.Label(details_heading, text="Connection details", bg=SURFACE, fg=INK,
                  font=("Segoe UI Semibold", 11)).pack(side="left")
-        tk.Label(details_heading, text="LIVE INTERFACE + ANALYZER", bg=SURFACE, fg=BLUE,
+        tk.Label(details_heading, textvariable=self.details_source_var, bg=SURFACE, fg=BLUE,
                  font=("Segoe UI Semibold", 7)).pack(side="right")
         self.details_grid = tk.Frame(self.details_panel, bg=SURFACE)
         self.details_grid.pack(fill="x")
@@ -442,6 +449,12 @@ class WiseApp(tk.Tk):
         tick()
 
     def _animate_bars(self, score_info):
+        for callback_id in self.bar_animation_ids:
+            try:
+                self.after_cancel(callback_id)
+            except tk.TclError:
+                pass
+        self.bar_animation_ids.clear()
         targets = {}
         for item in score_info["breakdown"]:
             key = {"Security protocol": "protocol", "Company SSID/password": "company_and_password",
@@ -455,7 +468,40 @@ class WiseApp(tk.Tk):
             def draw(frame=frame):
                 for bar, target, start in targets.values():
                     bar["value"] = round(start + (target - start) * frame / 14)
-            self.after(18 * frame, draw)
+            self.bar_animation_ids.append(self.after(18 * frame, draw))
+
+    def _close_app(self):
+        self.closing = True
+        self.scan_session += 1
+        for callback_id in (self.scan_poll_id, self.scan_animation_id, self.score_animation_id,
+                            *self.bar_animation_ids):
+            if callback_id:
+                try:
+                    self.after_cancel(callback_id)
+                except tk.TclError:
+                    pass
+        self.destroy()
+
+    def _process_scan_events(self):
+        self.scan_poll_id = None
+        try:
+            event = self.scan_events.get_nowait()
+        except queue.Empty:
+            event = None
+
+        if event is not None:
+            kind, session, *payload = event
+            if session == self.scan_session:
+                if kind == "connection":
+                    self._on_connection_read(session, payload[0])
+                elif kind == "analysis":
+                    connection, networks, environment, error = payload
+                    self._apply_analysis(session, connection, networks, environment, error)
+                elif kind == "failure":
+                    self._scan_failed(payload[0])
+
+        if not self.closing:
+            self.scan_poll_id = self.after(60, self._process_scan_events)
 
     def start_scan(self):
         self.scan_session += 1
@@ -480,19 +526,19 @@ class WiseApp(tk.Tk):
         try:
             from conn_network import connected_wifi
             connection = connected_wifi()
-            self.after(0, lambda: self._on_connection_read(session, connection))
         except Exception as error:
-            self.after(0, lambda: self._scan_failed(str(error)))
+            self.scan_events.put(("failure", session, str(error)))
             return
+        self.scan_events.put(("connection", session, connection))
 
         # Do the optional nearby scan only after the connected-network score has
         # been displayed and saved. PyWiFi may be slower or unavailable on a host.
         try:
             from analyzer import analyze
             networks, environment = analyze()
-            self.after(0, lambda: self._apply_analysis(session, connection, networks, environment, None))
+            self.scan_events.put(("analysis", session, connection, networks, environment, None))
         except Exception as analysis_error:
-            self.after(0, lambda: self._apply_analysis(session, connection, [], None, str(analysis_error)))
+            self.scan_events.put(("analysis", session, connection, [], None, str(analysis_error)))
 
     def _on_connection_read(self, session, connection):
         if session != self.scan_session:
@@ -536,6 +582,7 @@ class WiseApp(tk.Tk):
 
     def _show_connection(self, connection):
         self.connection = connection
+        self.viewing_saved_scan = False
         self.latest_scan_id = None
         self.scan_button.configure(state="normal", text="  Scan network  ")
         self.company_var.set(False)
@@ -557,11 +604,13 @@ class WiseApp(tk.Tk):
 
     def _render_backend_details(self, connection):
         analysis = connection.get("analysis") or {}
-        self.analyzed_network = analysis or None
-        self.environment = connection.get("environment")
+        self.details_source_var.set(
+            "SAVED ASSESSMENT" if self.viewing_saved_scan else "CURRENT INTERFACE + ANALYZER"
+        )
 
         detail_items = [
-            ("Connected interface", connection.get("state")),
+            ("Connected interface", connection.get("interface")),
+            ("Connection status", connection.get("state")),
             ("SSID", connection.get("ssid")),
             ("Saved profile", connection.get("profile")),
             ("Authentication", connection.get("authentication")),
@@ -572,6 +621,7 @@ class WiseApp(tk.Tk):
             ("Radio type", connection.get("radio_type")),
             ("Receive rate", f"{connection.get('receive_rate_mbps')} Mbps" if connection.get("receive_rate_mbps") is not None else None),
             ("Transmit rate", f"{connection.get('transmit_rate_mbps')} Mbps" if connection.get("transmit_rate_mbps") is not None else None),
+            ("Network type", connection.get("network_type")),
         ]
         if analysis:
             detail_items.extend([
@@ -585,8 +635,8 @@ class WiseApp(tk.Tk):
         for child in self.details_grid.winfo_children():
             child.destroy()
         color_by_label = {
-            "Connected interface": (GREEN_PALE, GREEN),
-            "Security assessment": (GREEN_PALE, GREEN),
+            "Connection status": (GREEN_PALE, GREEN),
+            "Connected interface": (BLUE_PALE, BLUE),
             "Channel status": (BLUE_PALE, BLUE),
             "Signal status": (BLUE_PALE, BLUE),
             "SSID": (SURFACE_ALT, INK),
@@ -596,6 +646,16 @@ class WiseApp(tk.Tk):
         visible_items = [(label, value) for label, value in detail_items if value not in (None, "")]
         for index, (label, value) in enumerate(visible_items):
             tile_bg, accent = color_by_label.get(label, (SURFACE_ALT, BLUE))
+            if label == "Security assessment":
+                status = str(value).casefold()
+                if status in ("very secure", "secure"):
+                    tile_bg, accent = GREEN_PALE, GREEN
+                elif status in ("weak", "unsecured"):
+                    tile_bg, accent = (RED_PALE, RED) if status == "unsecured" else (AMBER_PALE, AMBER)
+                else:
+                    tile_bg, accent = AMBER_PALE, AMBER
+            elif label == "Channel status" and str(value).casefold() == "overlapping":
+                tile_bg, accent = AMBER_PALE, AMBER
             tile = tk.Frame(self.details_grid, bg=tile_bg, padx=10, pady=8)
             tile.grid(row=index // 3, column=index % 3, sticky="nsew", padx=3, pady=3)
             tk.Label(tile, text=label.upper(), bg=tile_bg, fg=accent,
@@ -615,21 +675,29 @@ class WiseApp(tk.Tk):
             child.destroy()
         if environment:
             status = environment.get("status", "Unknown congestion")
+            recommended_channel = environment.get("recommended_channel")
             self.congestion_badge.configure(text=status)
-            self.congestion_badge.configure(
-                bg=GREEN_PALE if "LOW" in status.upper() else AMBER_PALE if "MODERATE" in status.upper() else RED_PALE,
-                fg=GREEN if "LOW" in status.upper() else AMBER if "MODERATE" in status.upper() else RED,
-            )
+            if "LOW" in status.upper():
+                badge_colors = (GREEN_PALE, GREEN)
+            elif "MODERATE" in status.upper():
+                badge_colors = (AMBER_PALE, AMBER)
+            elif "HIGH" in status.upper():
+                badge_colors = (RED_PALE, RED)
+            else:
+                badge_colors = (BLUE_PALE, BLUE)
+            self.congestion_badge.configure(bg=badge_colors[0], fg=badge_colors[1])
             score_parts = "     ".join(
                 f"Channel {channel}: {score} congestion points"
                 for channel, score in environment.get("channel_scores", {}).items()
             )
-            self.environment_var.set(
-                f"Recommended 2.4 GHz channel: {environment.get('recommended_channel', 'Unknown')}  |  "
-                f"{environment.get('message', '')}\n{score_parts}"
-            )
-            self._add_info_chip(self.channel_scores_frame,
-                                f"Recommended channel {environment.get('recommended_channel', 'Unknown')}", BLUE_PALE, BLUE)
+            if recommended_channel is None:
+                summary = environment.get("message", "There is not enough nearby 2.4 GHz data for a recommendation.")
+                chip_text = "No 2.4 GHz recommendation"
+            else:
+                summary = f"Recommended 2.4 GHz channel: {recommended_channel}  |  {environment.get('message', '')}"
+                chip_text = f"Recommended channel {recommended_channel}"
+            self.environment_var.set(f"{summary}\n{score_parts}")
+            self._add_info_chip(self.channel_scores_frame, chip_text, BLUE_PALE, BLUE)
             if analysis:
                 self._add_info_chip(self.channel_scores_frame,
                                     f"Current channel: {analysis.get('channel')} - {analysis.get('channel_status')}",
@@ -793,9 +861,13 @@ class WiseApp(tk.Tk):
         if not hasattr(self, "history_tree"):
             return
         try:
+            rows = database.list_scans()
+        except Exception as error:
+            self.status_var.set(f"Database error: {error}")
+            return
+        try:
             for item in self.history_tree.get_children():
                 self.history_tree.delete(item)
-            rows = database.list_scans()
             for row in rows:
                 self.history_tree.insert("", "end", iid=str(row["id"]), values=(
                     row["scanned_at"].replace("T", " "), row["ssid"], f"{row['score']} / 100",
@@ -809,10 +881,15 @@ class WiseApp(tk.Tk):
         selected = self.history_tree.selection()
         if not selected:
             return
-        record = database.get_scan(int(selected[0]))
+        try:
+            record = database.get_scan(int(selected[0]))
+        except Exception as error:
+            self.status_var.set(f"Could not open saved scan: {error}")
+            return
         if record is None:
             return
         self.latest_scan_id = record["id"]
+        self.viewing_saved_scan = True
         self.connection = record["connection"]
         self.score_info = record["score_details"]
         self.company_var.set(self.score_info.get("company_network", False))
@@ -830,7 +907,7 @@ class WiseApp(tk.Tk):
         self._animate_score(record["score"])
         self._animate_bars(self.score_info)
         all_rows = database.list_scans()
-        earlier = [row for row in all_rows if row["ssid"].casefold() == record["ssid"].casefold()
+        earlier = [row for row in all_rows if row["network_key"] == record["network_key"]
                    and (row["scanned_at"], row["id"]) < (record["scanned_at"], record["id"])]
         if earlier:
             previous = max(earlier, key=lambda row: (row["scanned_at"], row["id"]))
@@ -848,19 +925,32 @@ class WiseApp(tk.Tk):
         if not messagebox.askyesno("Delete assessment", "Delete this saved assessment from history?"):
             return
         record_id = int(selected[0])
-        database.delete_scan(record_id)
+        try:
+            database.delete_scan(record_id)
+        except Exception as error:
+            messagebox.showerror("Delete failed", f"The saved assessment could not be deleted.\n\n{error}")
+            return
         if record_id == self.latest_scan_id:
             self.latest_scan_id = None
         self.refresh_history()
         self.status_var.set("Assessment deleted.")
 
     def delete_all_history(self):
-        if not database.list_scans():
+        try:
+            has_history = bool(database.list_scans())
+        except Exception as error:
+            messagebox.showerror("History unavailable", f"WISE could not read scan history.\n\n{error}")
+            return
+        if not has_history:
             messagebox.showinfo("No history", "There are no saved assessments to clear.")
             return
         if not messagebox.askyesno("Clear history", "Permanently delete all saved Wi-Fi assessments?"):
             return
-        database.delete_all_scans()
+        try:
+            database.delete_all_scans()
+        except Exception as error:
+            messagebox.showerror("Clear failed", f"Scan history could not be cleared.\n\n{error}")
+            return
         self.latest_scan_id = None
         self.refresh_history()
         self.status_var.set("Scan history cleared.")

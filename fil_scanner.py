@@ -4,6 +4,7 @@ from pywifi import const
 
 def get_encryption(akm):
     security = []
+    akm = set(akm or ())
 
     if const.AKM_TYPE_NONE in akm:
         security.append("Open")
@@ -24,12 +25,17 @@ def get_encryption(akm):
 
 
 def normalize_frequency(freq):
+    if freq is None:
+        return None
+    freq = int(freq)
     if freq > 100000:
         freq = freq // 1000
     return freq
 
 
 def get_band(freq):
+    if freq is None:
+        return "Unknown"
     if 2400 <= freq <= 2500:
         return "2.4 GHz"
 
@@ -43,6 +49,8 @@ def get_band(freq):
 
 
 def get_channel(freq):
+    if freq is None:
+        return "Unknown"
 
     # 2.4 GHz channels
     if 2412 <= freq <= 2472:
@@ -63,6 +71,8 @@ def get_channel(freq):
 
 
 def signal_quality(dbm):
+    if dbm is None:
+        return 0
     quality = 2 * (dbm + 100)
 
     if quality > 100:
@@ -84,28 +94,29 @@ def scan():
     for network in results:
 
         # Replace blank SSID with <Hidden>
-        ssid = network.ssid.strip()
+        ssid = str(getattr(network, "ssid", "") or "").strip()
         if ssid == "":
             ssid = "<Hidden>"
 
         # Process network information
-        encryption = get_encryption(network.akm)
+        encryption = get_encryption(getattr(network, "akm", ()))
 
-        freq = normalize_frequency(network.freq)
+        freq = normalize_frequency(getattr(network, "freq", None))
 
         band = get_band(freq)
 
         channel = get_channel(freq)
 
-        bssid = network.bssid
+        bssid = str(getattr(network, "bssid", "") or "").strip().lower()
 
-        quality = signal_quality(network.signal)
+        signal = getattr(network, "signal", None)
+        quality = signal_quality(signal)
 
         # Store all network information in one dictionary
         network_info = {
             "ssid": ssid,
             "bssid": bssid,
-            "signal": network.signal,
+            "signal": signal,
             "quality": quality,
             "encryption": encryption,
             "frequency": freq,
@@ -114,11 +125,12 @@ def scan():
         }
 
         # Store each BSSID only once
-        if bssid not in networks_by_bssid:
-            networks_by_bssid[bssid] = network_info
+        key = bssid or f"{ssid.casefold()}:{freq}"
+        if key not in networks_by_bssid:
+            networks_by_bssid[key] = network_info
 
         # If the same BSSID appears again, keep the stronger signal
-        elif network.signal > networks_by_bssid[bssid]["signal"]:
-            networks_by_bssid[bssid] = network_info
+        elif (signal if signal is not None else -999) > (networks_by_bssid[key]["signal"] or -999):
+            networks_by_bssid[key] = network_info
 
     return list(networks_by_bssid.values())

@@ -31,6 +31,16 @@ The repository includes an empty SQLite database template at `data/wise_scans.db
 
 WISE reads the connected interface with Windows `netsh wlan show interfaces`. On first launch, it copies the empty template database to the runtime location. `database.py` exposes functions to save, list, retrieve, and delete assessments.
 
+## Optional console report
+
+Run `py scan_report.py` for a console-only nearby-network report. This troubleshooting tool performs a live radio scan; the desktop app does not need it.
+
+## Checks
+
+Run the offline project checks with `py -m unittest discover -s tests -v`. The optional nearby-network scan itself requires a working Wi-Fi adapter and is not run by the offline checks.
+
 ## Build a Windows executable
+
+The build script creates both `dist\WISE.exe` (windowed release) and `dist\WISE-Debug.exe` (console-enabled troubleshooting build).
 
 On Windows, run `.\build_exe.ps1` from PowerShell. The script installs the app/build dependencies and creates `dist\WISE.exe` as a single-file, windowed executable. Users can run the executable directly; no Python installation is needed. Their scan history is stored in `%LOCALAPPDATA%\WISE\wise_scans.db`.

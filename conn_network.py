@@ -9,20 +9,6 @@ def _number(value):
     return int(match.group()) if match else None
 
 
-def _frequency_for_channel(channel):
-    if channel is None:
-        return None
-    if 1 <= channel <= 13:
-        return 2407 + channel * 5
-    if channel == 14:
-        return 2484
-    if 32 <= channel <= 177:
-        return 5000 + channel * 5
-    if 1 <= channel <= 233:
-        return 5950 + channel * 5
-    return None
-
-
 def connected_wifi():
     """Return connection details from ``netsh`` or raise a helpful error."""
     result = subprocess.run(
@@ -61,28 +47,17 @@ def connected_wifi():
 
     channel = _number(connected.get("channel"))
     signal = _number(connected.get("signal"))
-    frequency = _frequency_for_channel(channel)
-    if frequency is not None and frequency < 2500:
-        band = "2.4 GHz"
-    elif frequency is not None and frequency < 5925:
-        band = "5 GHz"
-    elif frequency is not None:
-        band = "6 GHz"
-    else:
-        band = "Unknown"
 
     return {
         "ssid": connected.get("ssid") or "<Hidden>",
         "interface": connected.get("name", "Unknown"),
-        "connection_status": connected.get("state", "Unknown"),
+        "state": connected.get("state", "Unknown"),
+        "profile": connected.get("profile", "Unknown"),
         "bssid": connected.get("bssid", "Unknown"),
         "authentication": connected.get("authentication", "Unknown"),
         "cipher": connected.get("cipher", "Unknown"),
         "signal_percent": signal,
-        "signal_quality_percent": signal,
         "channel": channel,
-        "frequency_mhz": frequency,
-        "band": band,
         "radio_type": connected.get("radio type", "Unknown"),
         "receive_rate_mbps": _number(connected.get("receive rate (Mbps)")),
         "transmit_rate_mbps": _number(connected.get("transmit rate (Mbps)")),

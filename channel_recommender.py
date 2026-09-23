@@ -10,12 +10,21 @@ def recommend_channel(networks):
         11: 0
     }
 
-    for network in networks:
+    usable_networks = [
+        network for network in networks
+        if network.get("band") == "2.4 GHz" and isinstance(network.get("channel"), int)
+    ]
+    if not usable_networks:
+        return {
+            "recommended_channel": None,
+            "channel_scores": channel_scores,
+            "status": "No 2.4 GHz data",
+            "message": "A 2.4 GHz channel recommendation needs nearby 2.4 GHz networks; no usable data was found.",
+        }
+
+    for network in usable_networks:
 
         # Ignore non-2.4 GHz networks
-        if network["band"] != "2.4 GHz":
-            continue
-
         channel = network["channel"]
         quality = network["quality"]
 

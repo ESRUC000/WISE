@@ -8,7 +8,7 @@ def get_security_recommendation(network):
 
     if status == "Very Secure":
         recommendations.append(
-            "No security improvements are currently recommended."
+            "Keep WPA3 enabled. WISE cannot verify password strength or router firmware from this scan."
         )
 
     elif status == "Secure":
@@ -49,7 +49,7 @@ def get_channel_recommendation(network, environment):
 
     status = network["channel_status"]
 
-    if status == "Overlapping":
+    if status == "Overlapping" and environment.get("recommended_channel") is not None:
         recommendations.append(
             f"Change your router to channel {environment['recommended_channel']} to reduce interference."
         )
@@ -122,8 +122,6 @@ def get_band_recommendation(network, networks):
     # -----------------------------
     if network["band"] == "2.4 GHz":
 
-        found_5 = False
-
         for other in networks:
 
             if other["ssid"] != network["ssid"]:
@@ -134,8 +132,6 @@ def get_band_recommendation(network, networks):
 
             if other["band"] != "5 GHz":
                 continue
-
-            found_5 = True
 
             if other["quality"] >= 60:
                 recommendations.append(
