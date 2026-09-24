@@ -44,3 +44,5 @@ Run the offline project checks with `py -m unittest discover -s tests -v`. The o
 The build script creates both `dist\WISE.exe` (windowed release) and `dist\WISE-Debug.exe` (console-enabled troubleshooting build).
 
 On Windows, run `.\build_exe.ps1` from PowerShell. The script installs the app/build dependencies and creates `dist\WISE.exe` as a single-file, windowed executable. Users can run the executable directly; no Python installation is needed. Their scan history is stored in `%LOCALAPPDATA%\WISE\wise_scans.db`.
+
+The current windowed executable is also checked in at [`release/WISE.exe`](release/WISE.exe). It is built from this repository's `app.py` using `build_exe.ps1`; see [`release/README.md`](release/README.md) for its checksum and details. Rebuild it after changing the source so the checked-in executable stays current.
