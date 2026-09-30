@@ -1,11 +1,10 @@
-"""Modern Tkinter desktop interface for WISE Wi-Fi security scoring."""
+"""Frontend"""
 
 import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
-
-import database
+import api_client as database
 from security_score import compare_scores, score_connection
 
 
@@ -53,8 +52,10 @@ class WiseApp(tk.Tk):
         self.scan_session = 0
         self.scan_events = queue.Queue()
         self.scan_poll_id = None
+        self.api_generation = 0
         self.bar_animation_ids = []
         self.closing = False
+        self.user = None
 
         self.database_start_error = None
         try:
@@ -66,8 +67,9 @@ class WiseApp(tk.Tk):
         self._build_shell()
         self._build_dashboard()
         self._build_history()
+        self._build_auth()
         self.show_page("dashboard")
-        self.refresh_history()
+        self._show_auth()
         self.protocol("WM_DELETE_WINDOW", self._close_app)
         self.scan_poll_id = self.after(60, self._process_scan_events)
         if self.database_start_error:
@@ -109,14 +111,18 @@ class WiseApp(tk.Tk):
 
         self._nav_button("dashboard", "◉", "Overview")
         self._nav_button("history", "◷", "Scan history")
+        tk.Button(self.sidebar, text="  ↪     Log out", command=self.logout, anchor="w",
+                  relief="flat", bd=0, padx=15, pady=12, cursor="hand2", bg=NAVY,
+                  fg="#AFC0D6", activebackground=NAVY_2, activeforeground="white",
+                  font=("Segoe UI Semibold", 9)).pack(fill="x", padx=12, pady=2)
 
         spacer = tk.Frame(self.sidebar, bg=NAVY)
         spacer.pack(fill="both", expand=True)
         side_info = tk.Frame(self.sidebar, bg=NAVY_2, padx=13, pady=12)
         side_info.pack(fill="x", padx=13, pady=15)
-        tk.Label(side_info, text="LOCAL & PRIVATE", bg=NAVY_2, fg="#C6D6EC",
+        tk.Label(side_info, text="ACCOUNT HISTORY", bg=NAVY_2, fg="#C6D6EC",
                  font=("Segoe UI Semibold", 8)).pack(anchor="w")
-        tk.Label(side_info, text="Your scan history stays on this device.", bg=NAVY_2, fg="#9EB0C8",
+        tk.Label(side_info, text="Your scans are stored by the WISE server.", bg=NAVY_2, fg="#9EB0C8",
                  wraplength=165, justify="left", font=("Segoe UI", 8)).pack(anchor="w", pady=(5, 0))
 
         self.main_area = tk.Frame(self, bg=BG)
@@ -142,6 +148,105 @@ class WiseApp(tk.Tk):
         footer.pack(fill="x", side="bottom")
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED,
                  font=("Segoe UI", 8), anchor="w").pack(fill="x")
+
+    def _build_auth(self):
+        self.auth_frame = tk.Frame(self, bg=BG)
+        card = tk.Frame(self.auth_frame, bg=SURFACE, padx=38, pady=34,
+                        highlightbackground=LINE, highlightthickness=1)
+        card.place(relx=.5, rely=.5, anchor="center", width=430)
+        tk.Label(card, text="WISE", bg=SURFACE, fg=NAVY, font=("Segoe UI", 25, "bold")).pack(anchor="w")
+        tk.Label(card, text="Sign in to access your Wi-Fi scan history from the WISE server.", bg=SURFACE,
+                 fg=MUTED, wraplength=340, justify="left", font=("Segoe UI", 9)).pack(anchor="w", pady=(5, 21))
+        self.auth_title = tk.StringVar(value="Log in")
+        tk.Label(card, textvariable=self.auth_title, bg=SURFACE, fg=INK,
+                 font=("Segoe UI Semibold", 15)).pack(anchor="w", pady=(0, 12))
+        tk.Label(card, text="Username", bg=SURFACE, fg=MUTED).pack(anchor="w")
+        self.auth_username = tk.Entry(card, font=("Segoe UI", 11), relief="solid", bd=1)
+        self.auth_username.pack(fill="x", ipady=7, pady=(4, 12))
+        tk.Label(card, text="Password", bg=SURFACE, fg=MUTED).pack(anchor="w")
+        self.auth_password = tk.Entry(card, font=("Segoe UI", 11), relief="solid", bd=1, show="•")
+        self.auth_password.pack(fill="x", ipady=7, pady=(4, 14))
+        self.auth_error = tk.StringVar(value="")
+        tk.Label(card, textvariable=self.auth_error, bg=SURFACE, fg=RED, wraplength=340,
+                 justify="left").pack(anchor="w", pady=(0, 6))
+        self.auth_submit = tk.Button(card, text="Log in", command=self._submit_auth, bg=BLUE, fg="white",
+                                     activebackground=BLUE_DARK, relief="flat", padx=12, pady=10,
+                                     font=("Segoe UI Semibold", 10), cursor="hand2")
+        self.auth_submit.pack(fill="x")
+        self.auth_toggle = tk.Button(card, text="New here? Create an account", command=self._toggle_auth,
+                                     bg=SURFACE, fg=BLUE, relief="flat", pady=10, cursor="hand2")
+        self.auth_toggle.pack(anchor="center")
+        tk.Label(card, text="Passwords are stored as salted PBKDF2 hashes.", bg=SURFACE, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(anchor="center", pady=(5, 0))
+        tk.Label(card, text=f"Server: {database.SERVER_URL}", bg=SURFACE, fg=MUTED,
+                 wraplength=340, justify="center", font=("Segoe UI", 8)).pack(anchor="center", pady=(8, 0))
+        self.auth_mode = "login"
+
+    def _show_auth(self):
+        self.sidebar.pack_forget()
+        self.main_area.pack_forget()
+        self.auth_frame.pack(fill="both", expand=True)
+
+    def _toggle_auth(self):
+        self.auth_mode = "register" if self.auth_mode == "login" else "login"
+        registering = self.auth_mode == "register"
+        self.auth_title.set("Create account" if registering else "Log in")
+        self.auth_submit.configure(text="Create account" if registering else "Log in")
+        self.auth_toggle.configure(text="Already registered? Log in" if registering else "New here? Create an account")
+        self.auth_error.set("")
+
+    def _submit_auth(self):
+        username, password = self.auth_username.get(), self.auth_password.get()
+        registering = self.auth_mode == "register"
+        self.auth_submit.configure(state="disabled")
+
+        def authenticate():
+            if registering:
+                return database.register_user(username, password)
+            user = database.authenticate_user(username, password)
+            if user is None:
+                raise ValueError("Username or password is incorrect.")
+            return user
+
+        def authenticated(user):
+            self.auth_submit.configure(state="normal")
+            self.user = user
+            self.auth_frame.pack_forget()
+            self.sidebar.pack(side="left", fill="y")
+            self.main_area.pack(side="left", fill="both", expand=True)
+            self.status_var.set(f"Signed in as {user['username']}.")
+            self.refresh_history()
+
+        def failed(error):
+            self.auth_submit.configure(state="normal")
+            self.auth_error.set(str(error))
+
+        self._run_api_task(authenticate, authenticated, failed)
+
+    def logout(self):
+        self.api_generation += 1
+        database.logout()
+        self.user = None
+        self.latest_scan_id = None
+        self.connection = None
+        self.score_info = None
+        self.viewing_saved_scan = False
+        self.company_var.set(False)
+        self.password_var.set(False)
+        self.ssid_var.set("No network scanned")
+        for variable in self.metric_vars.values():
+            variable.set("--")
+        self.connection_badge.configure(text="●  Not scanned", bg=SURFACE_ALT, fg=MUTED)
+        self.score_change_var.set("Your first scan sets a baseline")
+        self._animate_score(0)
+        self.auth_password.delete(0, "end")
+        self.auth_username.delete(0, "end")
+        self.auth_mode = "login"
+        self.auth_title.set("Log in")
+        self.auth_submit.configure(text="Log in")
+        self.auth_toggle.configure(text="New here? Create an account")
+        self.auth_error.set("")
+        self._show_auth()
 
     def _nav_button(self, key, icon, label):
         button = tk.Button(
@@ -491,7 +596,16 @@ class WiseApp(tk.Tk):
 
         if event is not None:
             kind, session, *payload = event
-            if session == self.scan_session:
+            if kind == "api":
+                generation, on_success, on_error, result, error = payload
+                if generation == self.api_generation:
+                    if isinstance(error, database.SessionExpired):
+                        self._session_expired()
+                    elif error is not None:
+                        on_error(error)
+                    else:
+                        on_success(result)
+            elif session == self.scan_session:
                 if kind == "connection":
                     self._on_connection_read(session, payload[0])
                 elif kind == "analysis":
@@ -502,6 +616,26 @@ class WiseApp(tk.Tk):
 
         if not self.closing:
             self.scan_poll_id = self.after(60, self._process_scan_events)
+
+    def _run_api_task(self, operation, on_success, on_error=None):
+        generation = self.api_generation
+        on_error = on_error or (lambda error: self.status_var.set(f"Server request failed: {error}"))
+
+        def worker():
+            try:
+                result = operation()
+                error = None
+            except Exception as caught:
+                result = None
+                error = caught
+            self.scan_events.put(("api", None, generation, on_success, on_error, result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _session_expired(self):
+        self.logout()
+        self.auth_error.set("Your session expired. Please log in again.")
+        self.status_var.set("Session expired. Sign in again to continue.")
 
     def start_scan(self):
         self.scan_session += 1
@@ -554,22 +688,36 @@ class WiseApp(tk.Tk):
         if error:
             connection["analysis_error"] = error
         else:
+            active_bssid = str(connection.get("bssid", "")).strip().casefold()
             active_ssid = connection.get("ssid", "").strip().casefold()
-            matches = [network for network in networks
-                       if str(network.get("ssid", "")).strip().casefold() == active_ssid]
+            matches = ([network for network in networks
+                        if str(network.get("bssid", "")).strip().casefold() == active_bssid]
+                       if active_bssid else [])
+            if not matches:
+                matches = [network for network in networks
+                           if str(network.get("ssid", "")).strip().casefold() == active_ssid]
             if matches:
                 connection["analysis"] = max(matches, key=lambda network: network.get("quality", 0))
+                if connection.get("rssi") is None:
+                    connection["rssi"] = connection["analysis"].get("signal")
             connection["nearby_networks"] = networks
             connection["environment"] = environment
         self.connection.update(connection)
         self._render_backend_details(self.connection)
         # Persist the analyzer payload into the existing scan record.
         if self.latest_scan_id is not None and self.score_info is not None:
-            try:
-                database.save_scan(self.connection, self.score_info, update_id=self.latest_scan_id)
-            except Exception as save_error:
-                self.status_var.set(f"Score saved, but detailed scan data could not be stored: {save_error}")
-                return
+            connection_snapshot = dict(self.connection)
+            score_snapshot = dict(self.score_info)
+            update_id = self.latest_scan_id
+            user_id = self.user["id"]
+            self._run_api_task(
+                lambda: database.save_scan(connection_snapshot, score_snapshot,
+                                           update_id=update_id, user_id=user_id),
+                lambda _saved: None,
+                lambda save_error: self.status_var.set(
+                    f"Score saved, but detailed scan data could not be stored: {save_error}"
+                ),
+            )
         self.status_var.set(
             f"Connected Wi-Fi score saved. Nearby analysis {('unavailable: ' + error) if error else 'updated.'}"
         )
@@ -839,53 +987,106 @@ class WiseApp(tk.Tk):
         # result of an otherwise successful connected-interface scan.
         self._animate_score(self.score_info["total"])
         self._animate_bars(self.score_info)
-        try:
-            saved = database.save_scan(self.connection, self.score_info, update_id=self.latest_scan_id)
+        connection_ref = self.connection
+        connection_snapshot = dict(self.connection)
+        score_snapshot = dict(self.score_info)
+        update_id = self.latest_scan_id
+        user_id = self.user["id"]
+
+        def saved_assessment(saved):
+            if self.connection is not connection_ref:
+                self.refresh_history()
+                return
             self.latest_scan_id = saved["id"]
             previous = None if saved.get("updated") else saved["previous"]
             previous_score = {"total": previous["score"]} if previous else None
-            change = compare_scores(previous_score, self.score_info)
+            change = compare_scores(previous_score, score_snapshot)
             self.score_change_var.set(change["label"])
+            self.status_var.set(f"Assessment saved for {connection_ref.get('ssid', 'Unknown network')}.")
             self.refresh_history()
-        except Exception as error:
+
+            if "nearby_networks" in self.connection:
+                self._persist_analysis()
+
+        def save_failed(error):
             self.score_change_var.set("Score calculated; scan history could not be saved")
             self.status_var.set(f"Score calculated but could not be saved: {error}")
             messagebox.showerror(
                 "Scan history unavailable",
-                f"WISE calculated a score of {self.score_info['total']} out of 100, but could not save it.\n\n{error}",
+                f"WISE calculated a score of {score_snapshot['total']} out of 100, but could not save it.\n\n{error}",
             )
+
+        self._run_api_task(
+            lambda: database.save_scan(connection_snapshot, score_snapshot, update_id=update_id,
+                                       user_id=user_id),
+            saved_assessment,
+            save_failed,
+        )
+
+    def _persist_analysis(self):
+        if self.connection is None or self.score_info is None or self.latest_scan_id is None or self.user is None:
             return
-        self.status_var.set(f"Assessment saved for {self.connection['ssid']}.")
+        connection_snapshot = dict(self.connection)
+        score_snapshot = dict(self.score_info)
+        update_id = self.latest_scan_id
+        user_id = self.user["id"]
+        self._run_api_task(
+            lambda: database.save_scan(connection_snapshot, score_snapshot,
+                                       update_id=update_id, user_id=user_id),
+            lambda _saved: self.status_var.set("Nearby analysis saved."),
+            lambda error: self.status_var.set(f"Nearby analysis could not be stored: {error}"),
+        )
 
     def refresh_history(self):
-        if not hasattr(self, "history_tree"):
+        if not hasattr(self, "history_tree") or self.user is None:
             return
-        try:
-            rows = database.list_scans()
-        except Exception as error:
+
+        user_id = self.user["id"]
+
+        def show_history(rows):
+            if self.user is None or self.user["id"] != user_id:
+                return
+            try:
+                for item in self.history_tree.get_children():
+                    self.history_tree.delete(item)
+                for row in rows:
+                    self.history_tree.insert("", "end", iid=str(row["id"]), values=(
+                        row["scanned_at"].replace("T", " "), row["ssid"], f"{row['score']} / 100",
+                        f"{row['protocol_score']} / 60", f"{row['company_score']} / 20",
+                        f"{row['other_score']} / 20"))
+                self.history_summary_var.set(f"{len(rows)} saved assessment{'s' if len(rows) != 1 else ''}")
+            except Exception as error:
+                self.status_var.set(f"Database error: {error}")
+
+        def history_failed(error):
             self.status_var.set(f"Database error: {error}")
-            return
-        try:
-            for item in self.history_tree.get_children():
-                self.history_tree.delete(item)
-            for row in rows:
-                self.history_tree.insert("", "end", iid=str(row["id"]), values=(
-                    row["scanned_at"].replace("T", " "), row["ssid"], f"{row['score']} / 100",
-                    f"{row['protocol_score']} / 60", f"{row['company_score']} / 20",
-                    f"{row['other_score']} / 20"))
-            self.history_summary_var.set(f"{len(rows)} saved assessment{'s' if len(rows) != 1 else ''}")
-        except Exception as error:
-            self.status_var.set(f"Database error: {error}")
+
+        self._run_api_task(lambda: database.list_scans(user_id), show_history, history_failed)
 
     def open_saved_scan(self, _event=None):
         selected = self.history_tree.selection()
         if not selected:
             return
-        try:
-            record = database.get_scan(int(selected[0]))
-        except Exception as error:
-            self.status_var.set(f"Could not open saved scan: {error}")
-            return
+        record_id = int(selected[0])
+        user_id = self.user["id"]
+
+        def load_record():
+            record = database.get_scan(record_id, user_id)
+            rows = database.list_scans(user_id) if record is not None else []
+            return record, rows
+
+        def show_record(result):
+            record, all_rows = result
+            if self.user is None or self.user["id"] != user_id:
+                return
+            if record is None:
+                return
+            self._display_saved_scan(record, all_rows)
+
+        self._run_api_task(load_record, show_record,
+                           lambda error: self.status_var.set(f"Could not open saved scan: {error}"))
+
+    def _display_saved_scan(self, record, all_rows):
         if record is None:
             return
         self.latest_scan_id = record["id"]
@@ -906,7 +1107,6 @@ class WiseApp(tk.Tk):
         self._render_backend_details(connection)
         self._animate_score(record["score"])
         self._animate_bars(self.score_info)
-        all_rows = database.list_scans()
         earlier = [row for row in all_rows if row["network_key"] == record["network_key"]
                    and (row["scanned_at"], row["id"]) < (record["scanned_at"], record["id"])]
         if earlier:
@@ -925,35 +1125,43 @@ class WiseApp(tk.Tk):
         if not messagebox.askyesno("Delete assessment", "Delete this saved assessment from history?"):
             return
         record_id = int(selected[0])
-        try:
-            database.delete_scan(record_id)
-        except Exception as error:
-            messagebox.showerror("Delete failed", f"The saved assessment could not be deleted.\n\n{error}")
-            return
-        if record_id == self.latest_scan_id:
-            self.latest_scan_id = None
-        self.refresh_history()
-        self.status_var.set("Assessment deleted.")
+        user_id = self.user["id"]
+
+        def deleted(_result):
+            if record_id == self.latest_scan_id:
+                self.latest_scan_id = None
+            self.refresh_history()
+            self.status_var.set("Assessment deleted.")
+
+        self._run_api_task(lambda: database.delete_scan(record_id, user_id), deleted,
+                           lambda error: messagebox.showerror(
+                               "Delete failed", f"The saved assessment could not be deleted.\n\n{error}"
+                           ))
 
     def delete_all_history(self):
-        try:
-            has_history = bool(database.list_scans())
-        except Exception as error:
-            messagebox.showerror("History unavailable", f"WISE could not read scan history.\n\n{error}")
-            return
-        if not has_history:
-            messagebox.showinfo("No history", "There are no saved assessments to clear.")
-            return
-        if not messagebox.askyesno("Clear history", "Permanently delete all saved Wi-Fi assessments?"):
-            return
-        try:
-            database.delete_all_scans()
-        except Exception as error:
-            messagebox.showerror("Clear failed", f"Scan history could not be cleared.\n\n{error}")
-            return
-        self.latest_scan_id = None
-        self.refresh_history()
-        self.status_var.set("Scan history cleared.")
+        user_id = self.user["id"]
+
+        def confirm_clear(rows):
+            if not rows:
+                messagebox.showinfo("No history", "There are no saved assessments to clear.")
+                return
+            if not messagebox.askyesno("Clear history", "Permanently delete all saved Wi-Fi assessments?"):
+                return
+
+            def cleared(_result):
+                self.latest_scan_id = None
+                self.refresh_history()
+                self.status_var.set("Scan history cleared.")
+
+            self._run_api_task(lambda: database.delete_all_scans(user_id), cleared,
+                               lambda error: messagebox.showerror(
+                                   "Clear failed", f"Scan history could not be cleared.\n\n{error}"
+                               ))
+
+        self._run_api_task(lambda: database.list_scans(user_id), confirm_clear,
+                           lambda error: messagebox.showerror(
+                               "History unavailable", f"WISE could not read scan history.\n\n{error}"
+                           ))
 
 
 if __name__ == "__main__":

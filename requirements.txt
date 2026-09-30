@@ -1,1 +1,2 @@
 PyWiFi==1.1.12
+psycopg[binary]>=3.2,<4

@@ -1,4 +1,6 @@
 def get_channel_status(band, channel):
+    if not isinstance(channel, int) or isinstance(channel, bool):
+        return "Unknown"
 
     # 2.4 GHz
     if band == "2.4 GHz":

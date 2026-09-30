@@ -1,6 +1,6 @@
-# WISE — Wi-Fi Insight & Security Explorer
+# WISE — Wi-Fi Inspection and Security Evaluator
 
-WISE is a Windows desktop app that assesses the Wi-Fi network currently connected to the computer. Each assessment is scored out of 100 and stored in a local SQLite history so you can compare rescans and remove saved records.
+WISE is a Windows desktop app that assesses the Wi-Fi network currently connected to the computer. Each assessment is scored out of 100 and stored in the signed-in account's history so you can compare rescans and remove saved records.
 
 ## Score
 
@@ -12,7 +12,7 @@ The score breakdown appears in the dashboard. A scan is saved automatically; sub
 
 ## Scan history and privacy
 
-The repository includes an empty SQLite database template at `data/wise_scans.db`. On first launch, WISE copies that template to a local runtime database, then stores scan history on the computer running the app. The runtime database is ignored by Git; only the empty template is shared. Scan history is not sent to GitHub. It can contain Wi-Fi network names and scan details, so do not upload or share a runtime database. Source mode keeps its runtime database as `wise_scans.db` beside the app; the packaged executable uses `%LOCALAPPDATA%\\WISE\\wise_scans.db`.
+WISE requires a user account. Usernames are unique without regard to letter case, and passwords are stored as salted PBKDF2-SHA256 hashes, never as plain text. Scans belong to the signed-in account and are stored by the API server, not on each desktop client. Session tokens are stored as hashes in the server database, survive server restarts, expire after 30 days, and are revoked on logout. An expired session returns the user to the login screen.
 
 ## Run the app
 
@@ -23,13 +23,41 @@ The repository includes an empty SQLite database template at `data/wise_scans.db
    py -m pip install -r requirements.txt
    ```
 
-3. Launch the interface:
+3. Start the API server in one PowerShell window:
 
    ```powershell
+   py server.py
+   ```
+
+The server listens on port 8000 by default. In another PowerShell window, point the desktop app at it and launch the interface:
+
+   ```powershell
+   $env:WISE_SERVER = "http://localhost:8000"
    py app.py
    ```
 
-WISE reads the connected interface with Windows `netsh wlan show interfaces`. On first launch, it copies the empty template database to the runtime location. `database.py` exposes functions to save, list, retrieve, and delete assessments.
+WISE reads the connected interface with Windows `netsh wlan show interfaces`. The desktop app sends account and scan operations to `server.py`; start that server before registering or logging in.
+
+## Accounts and shared scan history
+
+WISE requires a login before you can use the dashboard. Usernames are unique without regard to letter case. Passwords are stored as salted PBKDF2-SHA256 hashes; WISE never stores the original password. Every scan is associated with the account that created it, and history operations are restricted to that account.
+
+The API server uses SQLite on its host by default. For shared multi-device accounts and scan history, configure the server to use PostgreSQL, then point each desktop app at the reachable API server. Set `DATABASE_URL` only on the API server and `WISE_SERVER` on each client. For example, on the server:
+
+```powershell
+$env:DATABASE_URL = "postgresql://wise_app:YOUR_PASSWORD@your-db-host:5432/wise"
+py -m pip install -r requirements.txt
+py server.py
+```
+
+On each desktop, configure the API URL and launch WISE:
+
+```powershell
+$env:WISE_SERVER = "https://your-wise-api-host"
+py app.py
+```
+
+Use SSL-enabled connections for both PostgreSQL and the public API, and keep credentials out of source control. The API server creates its database tables on startup. Configure `TLS_CERT` and `TLS_KEY` to enable the API server's built-in HTTPS. If the server uses SQLite, accounts and scans stay on that server machine; every client must connect to the same API server to share them. API request bodies are limited to 1 MiB.
 
 ## Optional console report
 
@@ -43,6 +71,6 @@ Run the offline project checks with `py -m unittest discover -s tests -v`. The o
 
 The build script creates both `dist\WISE.exe` (windowed release) and `dist\WISE-Debug.exe` (console-enabled troubleshooting build).
 
-On Windows, run `.\build_exe.ps1` from PowerShell. The script installs the app/build dependencies and creates `dist\WISE.exe` as a single-file, windowed executable. Users can run the executable directly; no Python installation is needed. Their scan history is stored in `%LOCALAPPDATA%\WISE\wise_scans.db`.
+On Windows, run `.\build_exe.ps1` from PowerShell. The script installs the app/build dependencies and creates `dist\WISE.exe` as a single-file, windowed executable. Users can run the executable directly; no Python installation is needed. Configure `WISE_SERVER` for the API server; scan history is stored in the server's configured database.
 
 The current windowed executable is also checked in at [`release/WISE.exe`](release/WISE.exe). It is built from this repository's `app.py` using `build_exe.ps1`; see [`release/README.md`](release/README.md) for its checksum and details. Rebuild it after changing the source so the checked-in executable stays current.

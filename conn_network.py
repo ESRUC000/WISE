@@ -57,9 +57,10 @@ def connected_wifi():
         "authentication": connected.get("authentication", "Unknown"),
         "cipher": connected.get("cipher", "Unknown"),
         "signal_percent": signal,
+        "rssi": _number(connected.get("rssi") or connected.get("signal (dbm)")),
         "channel": channel,
         "radio_type": connected.get("radio type", "Unknown"),
-        "receive_rate_mbps": _number(connected.get("receive rate (Mbps)")),
-        "transmit_rate_mbps": _number(connected.get("transmit rate (Mbps)")),
+        "receive_rate_mbps": _number(connected.get("receive rate (mbps)")),
+        "transmit_rate_mbps": _number(connected.get("transmit rate (mbps)")),
         "network_type": connected.get("network type", "Unknown"),
     }

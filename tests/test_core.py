@@ -1,6 +1,10 @@
 import sqlite3
 import tempfile
 import unittest
+import io
+import json
+from urllib.error import HTTPError
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -9,6 +13,7 @@ import checknetwork
 import conn_network
 import database
 import analyzer
+import api_client
 from channel_recommender import recommend_channel
 from fil_scanner import scan as scan_nearby
 from pywifi import const
@@ -36,6 +41,13 @@ class ScoringTests(unittest.TestCase):
 
 
 class ChannelTests(unittest.TestCase):
+    def test_unknown_channel_is_safe_for_every_band(self):
+        from channel_check import get_channel_status
+
+        for band in ("2.4 GHz", "5 GHz", "6 GHz"):
+            with self.subTest(band=band):
+                self.assertEqual(get_channel_status(band, "Unknown"), "Unknown")
+
     def test_no_2_4_ghz_measurements_do_not_claim_low_congestion(self):
         result = recommend_channel([])
         self.assertIsNone(result["recommended_channel"])
@@ -65,6 +77,7 @@ class NetworkParsingTests(unittest.TestCase):
     Receive rate (Mbps)    : 72
     Transmit rate (Mbps)   : 72
     Signal                 : 95%
+    RSSI                   : -48 dBm
     Profile                : Example Wi-Fi
 """
         completed = SimpleNamespace(returncode=0, stdout=output, stderr="")
@@ -75,6 +88,9 @@ class NetworkParsingTests(unittest.TestCase):
         self.assertEqual(info["ssid"], "Example Wi-Fi")
         self.assertEqual(info["signal_percent"], 95)
         self.assertEqual(info["channel"], 11)
+        self.assertEqual(info["receive_rate_mbps"], 72)
+        self.assertEqual(info["transmit_rate_mbps"], 72)
+        self.assertEqual(info["rssi"], -48)
 
     def test_disconnected_machine_returns_actionable_error(self):
         completed = SimpleNamespace(returncode=0, stdout="There is 1 interface on the system:\n", stderr="")
@@ -137,6 +153,55 @@ class DatabaseTests(unittest.TestCase):
     def _score(total):
         return {"total": total, "protocol": 48, "company_and_password": 0, "other": total - 48}
 
+    def test_accounts_have_unique_case_insensitive_usernames_and_hashed_passwords(self):
+        user = database.register_user("Alice", "correct horse battery")
+        self.assertEqual(database.authenticate_user("ALICE", "correct horse battery"), user)
+        self.assertIsNone(database.authenticate_user("Alice", "wrong password"))
+        with closing(sqlite3.connect(database.DATABASE_PATH)) as connection:
+            password_hash = connection.execute(
+                "SELECT password_hash FROM users WHERE id = ?", (user["id"],)
+            ).fetchone()[0]
+        self.assertNotEqual(password_hash, "correct horse battery")
+        self.assertTrue(password_hash.startswith("pbkdf2_sha256$"))
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            database.register_user("aLiCe", "another secure password")
+
+    def test_scan_history_is_scoped_to_its_account(self):
+        first_user = database.register_user("first.user", "first secure password")
+        second_user = database.register_user("second.user", "second secure password")
+        connection_info = {"ssid": "Shared network", "authentication": "WPA2-Personal"}
+
+        first_scan = database.save_scan(connection_info, self._score(60), user_id=first_user["id"])
+        second_scan = database.save_scan(connection_info, self._score(70), user_id=second_user["id"])
+
+        self.assertIsNone(second_scan["previous"])
+        self.assertEqual([row["id"] for row in database.list_scans(first_user["id"])], [first_scan["id"]])
+        self.assertEqual([row["id"] for row in database.list_scans(second_user["id"])], [second_scan["id"]])
+        self.assertIsNone(database.get_scan(first_scan["id"], second_user["id"]))
+        self.assertFalse(database.delete_scan(first_scan["id"], second_user["id"]))
+        self.assertEqual(database.delete_all_scans(second_user["id"]), 1)
+        self.assertEqual(len(database.list_scans(first_user["id"])), 1)
+
+    def test_sessions_persist_as_hashes_and_can_be_revoked(self):
+        user = database.register_user("session.user", "session password long")
+        token = "opaque-session-token"
+        database.create_session(token, user["id"])
+        self.assertEqual(database.get_session_user_id(token), user["id"])
+        with closing(sqlite3.connect(database.DATABASE_PATH)) as connection:
+            token_hash = connection.execute("SELECT token_hash FROM sessions").fetchone()[0]
+        self.assertNotEqual(token_hash, token)
+
+        database.delete_session(token)
+        self.assertIsNone(database.get_session_user_id(token))
+        database.create_session("expired-session-token", user["id"], ttl_seconds=-1)
+        self.assertIsNone(database.get_session_user_id("expired-session-token"))
+
+    def test_postgres_unique_violation_is_recognized(self):
+        class UniqueViolation(Exception):
+            sqlstate = "23505"
+
+        self.assertTrue(database._is_username_conflict(UniqueViolation()))
+
     def test_save_update_read_and_delete_history(self):
         connection_info = {"ssid": "Office Wi-Fi", "authentication": "WPA2-Personal"}
         first = database.save_scan(connection_info, self._score(60))
@@ -186,6 +251,78 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(record["network_key"], "ssid:office wi-fi")
         self.assertEqual(record["score_details"]["total"], 60)
         self.assertEqual(len(record["score_details"]["breakdown"]), 3)
+
+
+class ApiClientTests(unittest.TestCase):
+    def test_non_json_http_error_returns_actionable_response(self):
+        error = HTTPError("http://wise", 502, "Bad Gateway", {}, io.BytesIO(b"<html>proxy error</html>"))
+        with patch("api_client.urllib.request.urlopen", side_effect=error):
+            status, data = api_client._call("GET", "/scans")
+        self.assertEqual(status, 502)
+        self.assertIn("non-JSON", data["error"])
+        error.close()
+
+    def test_logout_clears_token_without_waiting_for_server(self):
+        api_client._token = "active-token"
+        with patch("api_client.threading.Thread") as thread_factory:
+            api_client.logout()
+        self.assertIsNone(api_client._token)
+        thread_factory.return_value.start.assert_called_once_with()
+
+    def test_unauthorized_response_is_a_session_expiry(self):
+        with self.assertRaises(api_client.SessionExpired):
+            api_client._ok((401, {"error": "Session expired"}))
+
+
+class ServerTests(unittest.TestCase):
+    def setUp(self):
+        self.original_path = database.DATABASE_PATH
+        self.temp_dir = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        database.DATABASE_PATH = Path(self.temp_dir.name) / "wise_scans.db"
+        database.initialize_database()
+        import server
+        self.server = server
+        self.server.FAILS.clear()
+
+    def tearDown(self):
+        self.server.FAILS.clear()
+        database.DATABASE_PATH = self.original_path
+        self.temp_dir.cleanup()
+
+    def _handler(self, path, body, client_ip="192.0.2.1"):
+        handler = object.__new__(self.server.Handler)
+        encoded_body = json.dumps(body).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(encoded_body)), "Authorization": "Bearer test-token"}
+        handler.rfile = io.BytesIO(encoded_body)
+        handler.wfile = io.BytesIO()
+        handler.close_connection = False
+        handler.command = "POST"
+        handler.path = path
+        handler.client_address = (client_ip, 12345)
+        handler._send = Mock()
+        return handler
+
+    def test_oversized_request_body_is_rejected(self):
+        handler = self._handler("/login", {})
+        handler.headers["Content-Length"] = str(self.server.MAX_REQUEST_BYTES + 1)
+        handler._handle()
+        self.assertEqual(handler._send.call_args.args[0], 413)
+
+    def test_scan_without_connection_or_score_returns_bad_request(self):
+        handler = self._handler("/scans", {"score": {"total": 10}})
+        with patch.object(self.server.database, "get_session_user_id", return_value=5):
+            handler._handle()
+        self.assertEqual(handler._send.call_args.args[0], 400)
+
+    def test_failed_login_lockouts_are_scoped_to_client_and_username(self):
+        with patch.object(self.server.database, "authenticate_user", return_value=None):
+            for client_ip in ("192.0.2.1", "192.0.2.2"):
+                handler = self._handler("/login", {"username": "target", "password": "wrong"}, client_ip)
+                handler.headers.pop("Authorization")
+                with patch.object(self.server.database, "create_session"):
+                    handler._handle()
+        self.assertIn(("192.0.2.1", "target"), self.server.FAILS)
+        self.assertIn(("192.0.2.2", "target"), self.server.FAILS)
 
 
 if __name__ == "__main__":
