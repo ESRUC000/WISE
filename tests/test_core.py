@@ -3,6 +3,8 @@ import tempfile
 import unittest
 import io
 import json
+import socket
+import sys
 from urllib.error import HTTPError
 from contextlib import closing
 from pathlib import Path
@@ -16,23 +18,45 @@ import analyzer
 import api_client
 from channel_recommender import recommend_channel
 from fil_scanner import scan as scan_nearby
-from pywifi import const
 from security_score import compare_scores, score_connection
+from network_audit import analyze_networks
 
 
 class ScoringTests(unittest.TestCase):
-    def test_wpa3_maximum_score_and_company_answers(self):
+    def test_radio_link_rate_adds_performance_points(self):
+        base = {"ssid": "Home", "authentication": "WPA2", "cipher": "CCMP", "signal_percent": 80}
+        without_rate = score_connection(base)
+        with_rate = score_connection({**base, "receive_rate_mbps": 300, "transmit_rate_mbps": 300})
+        self.assertEqual(with_rate["performance"] - without_rate["performance"], 4)
+
+    def test_wpa3_maximum_50_30_20_score(self):
         score = score_connection(
-            {"authentication": "WPA3-Personal", "cipher": "CCMP", "signal_percent": 95},
-            company_network=False,
+            {"ssid": "Home Secure", "authentication": "WPA3-Personal", "cipher": "CCMP",
+             "signal_percent": 95, "receive_rate_mbps": 300, "transmit_rate_mbps": 300,
+             "analysis": {"channel_status": "Recommended"}},
             password_policy_ok=True,
+            router_admin_password_ok=True,
+            performance_metrics={
+                "ping": {"latency_ms": 18, "packet_loss_percent": 0},
+                "dns": {"resolution_ms": 25},
+                "speed": {"download_mbps": 150},
+            },
         )
-        self.assertEqual((score["protocol"], score["company_and_password"], score["other"], score["total"]),
-                         (60, 20, 20, 100))
+        self.assertEqual((score["security"], score["performance"], score["configuration"], score["total"]),
+                         (50, 30, 20, 100))
+
+    def test_suspected_rogue_ap_reduces_security_score(self):
+        connection = {
+            "ssid": "Home Secure", "authentication": "WPA3-Personal", "cipher": "CCMP",
+            "signal_percent": 95, "rogue_ap_suspected": True,
+        }
+        score = score_connection(connection)
+        self.assertEqual(score["rogue_ap_penalty"], 15)
+        self.assertEqual(score["security"], 35)
 
     def test_open_network_receives_no_protocol_points(self):
         score = score_connection({"authentication": "Open", "cipher": "None", "signal_percent": 0})
-        self.assertEqual((score["protocol"], score["total"]), (0, 0))
+        self.assertEqual(score["security"], 0)
 
     def test_score_comparison(self):
         result = compare_scores({"total": 40}, {"total": 55})
@@ -41,6 +65,14 @@ class ScoringTests(unittest.TestCase):
 
 
 class ChannelTests(unittest.TestCase):
+    def test_connected_channel_status_uses_netsh_channel_without_nearby_data(self):
+        from app import WiseApp
+
+        self.assertEqual(WiseApp._connected_channel_status({"channel": 6}), "Recommended")
+        self.assertEqual(WiseApp._connected_channel_status({"channel": 36}), "Good")
+        self.assertEqual(WiseApp._connected_channel_status({"channel": 200}), "Excellent")
+        self.assertEqual(WiseApp._connected_channel_status({"channel": 20}), "Unknown")
+
     def test_unknown_channel_is_safe_for_every_band(self):
         from channel_check import get_channel_status
 
@@ -59,6 +91,143 @@ class ChannelTests(unittest.TestCase):
             {"band": "2.4 GHz", "channel": 6, "quality": 20},
         ])
         self.assertEqual(result["recommended_channel"], 11)
+
+    def test_connected_ap_is_excluded_from_channel_congestion(self):
+        result = recommend_channel([
+            {"ssid": "Home", "bssid": "own", "band": "2.4 GHz", "channel": 1, "quality": 100},
+            {"ssid": "Other", "bssid": "peer", "band": "2.4 GHz", "channel": 6, "quality": 40},
+        ], connected_bssid="own")
+        self.assertEqual(result["channel_scores"][1], 0)
+        self.assertEqual(result["recommended_channel"], 1)
+
+    def test_channel_advice_compares_actual_congestion_and_is_connected_only(self):
+        from recommendations import get_channel_recommendation
+
+        environment = {"recommended_channel": 6, "channel_scores": {1: 250, 6: 40, 11: 100}}
+        network = {"channel": 1, "channel_status": "Recommended"}
+        advice = get_channel_recommendation(network, environment, is_connected=True)
+        self.assertIn("channel 6", advice[0])
+        self.assertEqual(get_channel_recommendation(network, environment, is_connected=False), [])
+
+
+class NetworkAuditTests(unittest.TestCase):
+    def test_flags_weak_duplicate_ssid_as_possible_rogue_ap(self):
+        networks = [
+            {"ssid": "Office", "bssid": "00:00:00:00:00:01", "security_status": "Secure"},
+            {"ssid": "Office", "bssid": "00:00:00:00:00:02", "security_status": "Unsecured"},
+        ]
+        analyze_networks(networks)
+        self.assertTrue(networks[1]["rogue_ap_suspected"])
+
+    def test_identifies_default_and_hidden_ssid_hygiene(self):
+        networks = [
+            {"ssid": "NETGEAR-Setup", "bssid": "00:00:00:00:00:01", "security_status": "Secure"},
+            {"ssid": "<Hidden>", "bssid": "00:00:00:00:00:02", "security_status": "Secure"},
+        ]
+        analyze_networks(networks)
+        self.assertTrue(networks[0]["ssid_hygiene"]["default_name"])
+        self.assertTrue(networks[1]["ssid_hygiene"]["hidden"])
+        self.assertTrue(networks[0]["configuration_recommendations"])
+
+
+class PerformanceTests(unittest.TestCase):
+    def test_quick_performance_check_skips_speed_test(self):
+        from performance_tests import measure_performance
+
+        with patch("performance_tests.measure_ping", return_value={"latency_ms": 20}), \
+             patch("performance_tests.measure_dns", return_value={"resolution_ms": 30}), \
+             patch("performance_tests.measure_speed") as speed_test:
+            result = measure_performance(include_speed_test=False)
+        speed_test.assert_not_called()
+        self.assertIsNone(result["speed"])
+
+    def test_ping_reports_latency_and_packet_loss(self):
+        result = SimpleNamespace(stdout="Reply time=10ms\nReply time=30ms\n", returncode=0)
+        with patch("performance_tests.subprocess.run", return_value=result):
+            from performance_tests import measure_ping
+            measured = measure_ping(count=4)
+        self.assertEqual(measured["latency_ms"], 20)
+        self.assertEqual(measured["packet_loss_percent"], 50)
+
+    def test_performance_recommendations_explain_slow_measurements(self):
+        from performance_tests import get_performance_recommendations
+
+        recommendations = get_performance_recommendations({
+            "ping": {"latency_ms": 180, "packet_loss_percent": 10},
+            "dns": {"resolution_ms": 260},
+            "speed": {"download_mbps": 10},
+        })
+        self.assertEqual(len(recommendations), 4)
+
+    def test_speed_test_failure_keeps_ping_and_dns_measurements(self):
+        from performance_tests import measure_performance
+
+        with patch("performance_tests.measure_ping", return_value={"latency_ms": 20, "packet_loss_percent": 0}), \
+             patch("performance_tests.measure_dns", return_value={"resolution_ms": 30}), \
+             patch("performance_tests.measure_speed", side_effect=RuntimeError("offline")):
+            result = measure_performance(include_speed_test=True)
+        self.assertEqual(result["ping"]["latency_ms"], 20)
+        self.assertEqual(result["dns"]["resolution_ms"], 30)
+        self.assertIn("offline", result["speed"]["error"])
+
+
+class DeviceDiscoveryTests(unittest.TestCase):
+    def _fake_modules(self, netmask):
+        scapy = __import__("types").ModuleType("scapy")
+        scapy_all = __import__("types").ModuleType("scapy.all")
+        scapy_all.conf = SimpleNamespace(route=SimpleNamespace(
+            route=lambda _destination: ("Wi-Fi", "192.168.4.20", "192.168.4.1")
+        ))
+        psutil = __import__("types").ModuleType("psutil")
+        psutil.net_if_addrs = lambda: {"Wi-Fi": [SimpleNamespace(
+            family=socket.AF_INET, address="192.168.4.20", netmask=netmask
+        )]}
+        return {"scapy": scapy, "scapy.all": scapy_all, "psutil": psutil}
+
+    def test_discovery_is_limited_to_connected_subnet(self):
+        from device_discovery import _connected_ipv4_network
+
+        with patch.dict(sys.modules, self._fake_modules("255.255.255.0")):
+            _interface, local_interface, network, gateway_ip = _connected_ipv4_network()
+        self.assertEqual(str(local_interface.ip), "192.168.4.20")
+        self.assertEqual(str(network), "192.168.4.0/24")
+        self.assertEqual(gateway_ip, "192.168.4.1")
+
+    def test_discovery_rejects_subnets_larger_than_limit(self):
+        from device_discovery import _connected_ipv4_network
+
+        with patch.dict(sys.modules, self._fake_modules("255.255.0.0")):
+            with self.assertRaisesRegex(RuntimeError, "limited to"):
+                _connected_ipv4_network()
+
+
+class ReportingTests(unittest.TestCase):
+    def test_reportlab_exports_a_pdf(self):
+        from reporting import export_pdf
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assessment.pdf"
+            export_pdf(
+                str(path),
+                                {"ssid": "Test Wi-Fi", "authentication": "WPA2", "cipher": "CCMP", "signal_percent": 85,
+                                 "channel": 6, "channel_status": "Recommended", "radio_type": "802.11ax",
+                                 "receive_rate_mbps": 300, "transmit_rate_mbps": 240,
+                                 "performance_metrics": {"ping": {"latency_ms": 20, "packet_loss_percent": 0},
+                                                                                    "dns": {"resolution_ms": 30}},
+                                 "performance_recommendations": ["Measured latency is low."],
+                                 "channel_advice": ["Keep the current channel."],
+                                 "nearby_networks": []},
+                {"total": 80, "breakdown": [
+                    {"category": "Security", "earned": 45, "possible": 50, "note": "WPA2 with CCMP"}
+                ]},
+                                [{"ssid": "Test Wi-Fi", "bssid": "aa:bb", "rogue_ap_suspected": True,
+                                    "ssid_hygiene": {"findings": ["Possible rogue AP"]}}],
+                                score_change="Improved by 5 points",
+                                device_snapshot={"scanned_at": "now", "subnet": "192.168.1.0/24", "gateway_ip": "192.168.1.1",
+                                                                 "devices": [{"ip": "192.168.1.1", "mac": "aa:bb", "is_gateway": True,
+                                                                                            "is_new": False, "is_local": False}]},
+            )
+            self.assertTrue(path.read_bytes().startswith(b"%PDF-"))
 
 
 class NetworkParsingTests(unittest.TestCase):
@@ -98,24 +267,65 @@ class NetworkParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "No connected Wi-Fi"):
                 conn_network.connected_wifi()
 
-    def test_no_adapter_is_a_runtime_error_not_an_import_error(self):
-        with patch("checknetwork.PyWiFi") as wifi_factory:
-            wifi_factory.return_value.interfaces.return_value = []
-            with self.assertRaisesRegex(RuntimeError, "No wireless adapter"):
-                checknetwork.scan_network(wait_seconds=0)
+    def test_netsh_scan_failure_is_actionable(self):
+        failure = SimpleNamespace(returncode=1, stdout="", stderr="WLAN AutoConfig is unavailable")
+        with patch("checknetwork.subprocess.run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "WLAN AutoConfig"):
+                checknetwork.scan_network()
 
     def test_adapter_scan_returns_results_after_requesting_a_scan(self):
-        interface = SimpleNamespace(scan=Mock(), scan_results=lambda: ["ap"])
-        with patch("checknetwork.PyWiFi") as wifi_factory, patch("checknetwork.time.sleep"):
-            wifi_factory.return_value.interfaces.return_value = [interface]
-            self.assertEqual(checknetwork.scan_network(), ["ap"])
-        interface.scan.assert_called_once_with()
+        second = SimpleNamespace(returncode=0, stdout="SSID 1 : Lab\n Authentication : WPA2-Personal\n BSSID 1 : aa:bb\n Signal : 90%\n Channel : 6\n", stderr="")
+        with patch("checknetwork.request_wlan_scan"), \
+             patch("checknetwork.subprocess.run", side_effect=(second, second, second)) as run, \
+             patch("checknetwork.time.sleep") as sleep:
+            networks = checknetwork.scan_network()
+        self.assertEqual(len(networks), 1)
+        self.assertEqual(networks[0]["ssid"], "Lab")
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5.0, 1.0, 1.0])
+
+    def test_scan_ignores_first_cached_read_and_waits_before_fresh_read(self):
+        fresh = SimpleNamespace(returncode=0, stdout="SSID 1 : Fresh\n BSSID 1 : cc:dd\n Channel : 36\n", stderr="")
+        with patch("checknetwork.request_wlan_scan"), \
+             patch("checknetwork.subprocess.run", side_effect=(fresh, fresh, fresh)), \
+             patch("checknetwork.time.sleep") as sleep:
+            networks = checknetwork.scan_network(wait_seconds=1)
+        self.assertEqual([network["ssid"] for network in networks], ["Fresh"])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5.0, 1.0, 1.0])
+
+    def test_netsh_parser_detects_wpa3_enterprise_and_multiple_bssids(self):
+        output = """SSID 1 : Example
+    Authentication : WPA3-Personal
+    Encryption : CCMP
+    BSSID 1 : aa:bb:cc:dd:ee:01
+        Signal : 88%
+        Radio type : 802.11ax
+        Channel : 36
+    BSSID 2 : aa:bb:cc:dd:ee:02
+        Signal : 45%
+        Radio type : 802.11ac
+        Channel : 11
+SSID 2 : Enterprise
+    Authentication : WPA2-Enterprise
+    Encryption : CCMP
+    BSSID 1 : aa:bb:cc:dd:ee:03
+        Signal : 60%
+        Channel : 6
+"""
+        networks = checknetwork.parse_nearby_networks(output)
+        self.assertEqual([network["authentication"] for network in networks],
+                         ["WPA3-Personal", "WPA3-Personal", "WPA2-Enterprise"])
+        self.assertEqual([network["band"] for network in networks], ["5 GHz", "2.4 GHz", "2.4 GHz"])
 
     def test_nearby_scan_normalizes_and_deduplicates_access_points(self):
-        one = SimpleNamespace(ssid=" Lab ", akm=[const.AKM_TYPE_WPA2PSK], freq=2412000,
-                              bssid="AA:BB", signal=-55)
-        duplicate = SimpleNamespace(ssid="Lab", akm=[const.AKM_TYPE_WPA2PSK], freq=2412000,
-                                    bssid="aa:bb", signal=-70)
+        one = {
+            "ssid": " Lab ", "authentication": "WPA2-Personal", "frequency": 2412,
+            "bssid": "AA:BB", "signal_percent": 90,
+        }
+        duplicate = {
+            "ssid": "Lab", "authentication": "WPA2-Personal", "frequency": 2412,
+            "bssid": "aa:bb", "signal_percent": 70,
+        }
         with patch("fil_scanner.checknetwork.scan_network", return_value=[one, duplicate]):
             results = scan_nearby()
         self.assertEqual(len(results), 1)
@@ -196,6 +406,35 @@ class DatabaseTests(unittest.TestCase):
         database.create_session("expired-session-token", user["id"], ttl_seconds=-1)
         self.assertIsNone(database.get_session_user_id("expired-session-token"))
 
+    def test_password_change_and_account_delete_require_current_password(self):
+        user = database.register_user("lifecycle.user", "original password")
+        with self.assertRaisesRegex(ValueError, "Current password"):
+            database.change_user_password(user["id"], "wrong password", "new password")
+        database.change_user_password(user["id"], "original password", "new password")
+        self.assertIsNone(database.authenticate_user("lifecycle.user", "original password"))
+        self.assertEqual(database.authenticate_user("lifecycle.user", "new password"), user)
+        with self.assertRaisesRegex(ValueError, "Password is incorrect"):
+            database.delete_user(user["id"], "wrong password")
+        self.assertTrue(database.delete_user(user["id"], "new password"))
+        self.assertIsNone(database.get_user(user["id"]))
+
+    def test_device_snapshots_mark_first_seen_macs(self):
+        user = database.register_user("device.user", "device password")
+        database.save_device_snapshot(user["id"], {
+            "interface": "Wi-Fi", "subnet": "192.168.1.0/24", "gateway_ip": "192.168.1.1",
+            "devices": [{"ip": "192.168.1.2", "mac": "aa:bb", "is_gateway": False}],
+        })
+        saved = database.save_device_snapshot(user["id"], {
+            "interface": "Wi-Fi", "subnet": "192.168.1.0/24", "gateway_ip": "192.168.1.1",
+            "devices": [{"ip": "192.168.1.1", "mac": "cc:dd", "is_gateway": True},
+                        {"ip": "192.168.1.2", "mac": "AA:BB", "is_gateway": False}],
+        })
+        self.assertFalse(database.latest_device_snapshot(user["id"])["devices"][1]["is_new"])
+        self.assertTrue(saved["devices"][0]["is_new"])
+        self.assertFalse(saved["devices"][1]["is_new"])
+        latest = database.latest_device_snapshot(user["id"])
+        self.assertEqual(latest["gateway_ip"], "192.168.1.1")
+
     def test_postgres_unique_violation_is_recognized(self):
         class UniqueViolation(Exception):
             sqlstate = "23505"
@@ -207,7 +446,7 @@ class DatabaseTests(unittest.TestCase):
         first = database.save_scan(connection_info, self._score(60))
         second = database.save_scan(connection_info, self._score(70), update_id=None)
         self.assertEqual(second["previous"]["score"], 60)
-        self.assertEqual(len(database.list_scans()), 2)
+        self.assertEqual(len(database.list_scans()), 1)
 
         connection_info["environment"] = {
             "recommended_channel": 6,
@@ -219,11 +458,25 @@ class DatabaseTests(unittest.TestCase):
         record = database.get_scan(second["id"])
         self.assertEqual(record["score"], 75)
         self.assertEqual(record["environment"]["recommended_channel"], 6)
-        self.assertEqual(len(database.list_scans()), 2)
+        self.assertEqual(len(database.list_scans()), 1)
 
         self.assertTrue(database.delete_scan(first["id"]))
-        self.assertEqual(database.delete_all_scans(), 1)
+        self.assertEqual(database.delete_all_scans(), 0)
         self.assertEqual(database.list_scans(), [])
+
+    def test_same_network_updates_by_default_and_can_be_saved_individually(self):
+        info = {"ssid": "Repeat Wi-Fi", "authentication": "WPA2-Personal"}
+        first = database.save_scan(info, self._score(60))
+        updated = database.save_scan(info, self._score(70))
+        self.assertTrue(updated["updated"])
+        self.assertEqual(updated["id"], first["id"])
+        self.assertEqual(updated["previous"]["score"], 60)
+        self.assertEqual(len(database.list_scans()), 1)
+
+        separate = database.save_scan(info, self._score(80), separate=True)
+        self.assertNotEqual(separate["id"], first["id"])
+        self.assertEqual(separate["previous"]["score"], 70)
+        self.assertEqual(len(database.list_scans()), 2)
 
     def test_hidden_networks_are_grouped_by_bssid(self):
         first = database.save_scan({"ssid": "<Hidden>", "bssid": "aa:bb"}, self._score(10))
@@ -272,6 +525,21 @@ class ApiClientTests(unittest.TestCase):
     def test_unauthorized_response_is_a_session_expiry(self):
         with self.assertRaises(api_client.SessionExpired):
             api_client._ok((401, {"error": "Session expired"}))
+
+    def test_session_token_is_memory_only_and_not_restored_through_keyring(self):
+        credentials = {}
+        keyring = SimpleNamespace(
+            set_password=lambda service, endpoint, token: credentials.update({(service, endpoint): token}),
+            get_password=lambda service, endpoint: credentials.get((service, endpoint)),
+            delete_password=lambda service, endpoint: credentials.pop((service, endpoint), None),
+        )
+        with patch.object(api_client, "_keyring", return_value=keyring):
+            api_client._store_token("remembered-token")
+            self.assertNotIn(("WISE API session", api_client.SERVER_URL), credentials)
+            api_client._token = None
+            with patch.object(api_client, "_call") as call:
+                self.assertIsNone(api_client.restore_session())
+                call.assert_not_called()
 
 
 class ServerTests(unittest.TestCase):
@@ -323,6 +591,46 @@ class ServerTests(unittest.TestCase):
                     handler._handle()
         self.assertIn(("192.0.2.1", "target"), self.server.FAILS)
         self.assertIn(("192.0.2.2", "target"), self.server.FAILS)
+
+    def test_session_route_restores_signed_in_user(self):
+        handler = self._handler("/session", {})
+        handler.command = "GET"
+        with patch.object(self.server.database, "get_session_user_id", return_value=17), \
+             patch.object(self.server.database, "get_user", return_value={"id": 17, "username": "restored"}):
+            handler._handle()
+        self.assertEqual(handler._send.call_args.args, (200, {"user": {"id": 17, "username": "restored"}}))
+
+    def test_password_and_account_routes(self):
+        user = database.register_user("route.user", "old password")
+        token = "route-session"
+        database.create_session(token, user["id"])
+        with patch.object(self.server.database, "get_session_user_id", return_value=user["id"]):
+            handler = self._handler("/password", {
+                "current_password": "old password", "new_password": "new password",
+            })
+            handler._handle()
+            self.assertEqual(handler._send.call_args.args[0], 200)
+            self.assertEqual(database.authenticate_user("route.user", "new password"), user)
+
+            delete_handler = self._handler("/account", {"password": "new password"})
+            delete_handler.command = "DELETE"
+            delete_handler._handle()
+            self.assertEqual(delete_handler._send.call_args.args[0], 200)
+        self.assertIsNone(database.get_user(user["id"]))
+
+    def test_device_snapshot_routes_are_account_scoped(self):
+        user = database.register_user("route.device", "device password")
+        snapshot = {"interface": "Wi-Fi", "subnet": "192.168.0.0/24", "gateway_ip": "192.168.0.1",
+                    "devices": [{"ip": "192.168.0.1", "mac": "aa:bb", "is_gateway": True}]}
+        with patch.object(self.server.database, "get_session_user_id", return_value=user["id"]):
+            save_handler = self._handler("/devices", {"snapshot": snapshot})
+            save_handler._handle()
+            self.assertEqual(save_handler._send.call_args.args[0], 200)
+
+            get_handler = self._handler("/devices/latest", {})
+            get_handler.command = "GET"
+            get_handler._handle()
+            self.assertEqual(get_handler._send.call_args.args[1]["gateway_ip"], "192.168.0.1")
 
 
 if __name__ == "__main__":

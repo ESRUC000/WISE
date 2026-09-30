@@ -1,26 +1,13 @@
 import checknetwork
-from pywifi import const
 
 
 def get_encryption(akm):
-    security = []
-    akm = set(akm or ())
-
-    if const.AKM_TYPE_NONE in akm:
-        security.append("Open")
-
-    if const.AKM_TYPE_WPAPSK in akm:
-        security.append("WPA")
-
-    if const.AKM_TYPE_WPA2PSK in akm:
-        security.append("WPA2")
-
-    if hasattr(const, "AKM_TYPE_WPA3SAE") and const.AKM_TYPE_WPA3SAE in akm:
-        security.append("WPA3")
-
-    if security:
-        return "/".join(security)
-
+    value = str(akm or "").strip().upper()
+    if "OPEN" in value or value in ("NONE", "NO AUTHENTICATION"):
+        return "Open"
+    for protocol in ("WPA3", "WPA2", "WPA", "WEP"):
+        if protocol in value:
+            return protocol
     return "Unknown"
 
 
@@ -85,52 +72,55 @@ def signal_quality(dbm):
 
 
 def scan():
-
     results = checknetwork.scan_network()
-
-    # Store networks by BSSID (unique MAC address)
     networks_by_bssid = {}
-
     for network in results:
+        if isinstance(network, dict):
+            source = network
+        else:
+            source = {
+                "ssid": getattr(network, "ssid", ""),
+                "bssid": getattr(network, "bssid", ""),
+                "signal": getattr(network, "signal", None),
+                "frequency": getattr(network, "freq", None),
+                "akm": getattr(network, "authentication", ""),
+            }
 
-        # Replace blank SSID with <Hidden>
-        ssid = str(getattr(network, "ssid", "") or "").strip()
+        ssid = str(source.get("ssid", "") or "").strip()
         if ssid == "":
             ssid = "<Hidden>"
-
-        # Process network information
-        encryption = get_encryption(getattr(network, "akm", ()))
-
-        freq = normalize_frequency(getattr(network, "freq", None))
-
-        band = get_band(freq)
-
-        channel = get_channel(freq)
-
-        bssid = str(getattr(network, "bssid", "") or "").strip().lower()
-
-        signal = getattr(network, "signal", None)
-        quality = signal_quality(signal)
-
-        # Store all network information in one dictionary
+        authentication = source.get("authentication") or source.get("akm") or source.get("encryption")
+        encryption = get_encryption(authentication)
+        freq = normalize_frequency(source.get("frequency", source.get("freq")))
+        raw_channel = source.get("channel")
+        channel = raw_channel if isinstance(raw_channel, int) else get_channel(freq)
+        band = source.get("band") or get_band(freq)
+        if band == "Unknown" and isinstance(channel, int):
+            band = "2.4 GHz" if channel <= 14 else "6 GHz" if channel >= 178 else "5 GHz" if channel <= 177 else "Unknown"
+        bssid = str(source.get("bssid", "") or "").strip().casefold().rstrip(":")
+        signal = source.get("signal")
+        signal_percent = source.get("signal_percent")
+        quality = source.get("quality")
+        if quality is None:
+            quality = signal_percent if signal_percent is not None else signal_quality(signal)
         network_info = {
             "ssid": ssid,
             "bssid": bssid,
             "signal": signal,
             "quality": quality,
             "encryption": encryption,
+            "authentication": str(authentication or "Unknown"),
+            "cipher": source.get("cipher", "Unknown"),
+            "signal_percent": signal_percent,
             "frequency": freq,
             "band": band,
-            "channel": channel
+            "channel": channel,
+            "radio_type": source.get("radio_type", "Unknown"),
+            "network_type": source.get("network_type", "Unknown"),
         }
-
-        # Store each BSSID only once
         key = bssid or f"{ssid.casefold()}:{freq}"
         if key not in networks_by_bssid:
             networks_by_bssid[key] = network_info
-
-        # If the same BSSID appears again, keep the stronger signal
         elif (signal if signal is not None else -999) > (networks_by_bssid[key]["signal"] or -999):
             networks_by_bssid[key] = network_info
-
     return list(networks_by_bssid.values())

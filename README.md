@@ -4,11 +4,11 @@ WISE is a Windows desktop app that assesses the Wi-Fi network currently connecte
 
 ## Score
 
-- **Security protocol: 60 points.** WPA3 earns 60, WPA2 earns 48, WPA earns 24, WEP earns 8, and open or unknown authentication earns 0.
-- **Company SSID and password: 20 points.** You earn these points only when you confirm that this is not a company-managed SSID and that you use a strong, unique Wi-Fi password. WISE cannot inspect your organization’s policy or reveal/check the Wi-Fi password.
-- **Other safeguards: 20 points.** Up to 10 points are based on Windows-reported signal strength, and up to 10 points are awarded for a modern AES/CCMP/GCMP cipher.
+- **Security: 50 points.** Authentication contributes up to 35 points and modern AES/CCMP/GCMP cipher use contributes 15.
+- **Performance: 30 points.** Signal strength, ping latency, packet loss, DNS resolution time, and optional measured download speed contribute to this category. Run the active tests from the overview; speed testing is opt-in.
+- **Configuration: 20 points.** User-confirmed Wi-Fi and router administrator passphrases, SSID hygiene, and channel selection contribute to this category. WISE cannot inspect passwords or router settings.
 
-The score breakdown appears in the dashboard. A scan is saved automatically; subsequent assessments of the same SSID show whether the score improved, decreased, or stayed the same. Use the history tab to review or delete one assessment or all history.
+The score breakdown appears in the dashboard. By default, rescanning the same SSID updates its most recent history row while comparing against its prior score. Enable **Keep each scan** beside the Scan button to retain every scan as a separate history entry. Use Scan history to filter, compare, export, and delete assessments.
 
 ## Scan history and privacy
 
@@ -36,7 +36,15 @@ The server listens on port 8000 by default. In another PowerShell window, point 
    py app.py
    ```
 
-WISE reads the connected interface with Windows `netsh wlan show interfaces`. The desktop app sends account and scan operations to `server.py`; start that server before registering or logging in.
+WISE reads the connected interface and nearby access points through the Windows WLAN service. Nearby scanning requests a fresh adapter scan, waits for Windows to complete it, then samples the results several times and uses the most complete result. Windows may require location access to expose nearby Wi-Fi details; allow WISE under **Settings > Privacy & security > Location** if Windows blocks a scan. Authentication text from Windows supports WPA3 and enterprise networks without PyWiFi or comtypes. The desktop app sends account and scan operations to `server.py`; start that server before registering or logging in.
+
+The overview also checks nearby SSIDs for common default names and flags a possible rogue access point only when the same visible SSID is advertised with materially weaker security. These are heuristics, not proof of an attack. Device discovery is a separate, user-triggered ARP scan limited to the active IPv4 subnet and at most 1,024 addresses. On Windows, install Npcap and run the app with administrator privileges for ARP discovery. Performance tests, including internet speed testing, are also user-triggered.
+
+The Scan history page plots saved score trends with Matplotlib, filters by SSID, compares two selected assessments, and exports CSV. The Reports page exports a PDF with score changes, recommendations, identity findings, and the latest saved device inventory. Device discovery snapshots are kept per account and show the gateway and devices first seen in the latest scan.
+
+The overview provides a Quick test for ping and DNS only and a separate Speed test button; speed tests transfer data to an external test service. Performance recommendations are included in scoring, the dashboard recommendation panel, and PDF reports. Router/Wi-Fi confirmations are restored from the previous scan of the same SSID.
+
+Desktop clients remember `WISE_SERVER` in the current user's application settings. Session tokens stay in memory only and are cleared when WISE closes, so users must sign in each time the app opens. The sign-in screen also lets packaged-app users set the API URL directly. Account settings supports password changes and permanent account deletion.
 
 ## Accounts and shared scan history
 

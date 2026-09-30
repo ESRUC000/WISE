@@ -15,14 +15,16 @@ if ($LASTEXITCODE -ne 0) { throw "Installing build dependencies failed." }
 py -m PyInstaller --noconfirm --clean --onefile --windowed `
     --name WISE `
     --add-data "data\wise_scans.db;data" `
-    --collect-submodules pywifi `
+    --collect-submodules scapy `
+    --collect-submodules keyring `
     app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed to build WISE.exe." }
 
 py -m PyInstaller --noconfirm --onefile --console `
     --name WISE-Debug `
     --add-data "data\wise_scans.db;data" `
-    --collect-submodules pywifi `
+    --collect-submodules scapy `
+    --collect-submodules keyring `
     app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed to build WISE-Debug.exe." }
 

@@ -1,4 +1,4 @@
-def recommend_channel(networks):
+def recommend_channel(networks, connected_bssid=None):
     """
     Analyze all nearby Wi-Fi networks and recommend the best channel.
     """
@@ -13,6 +13,8 @@ def recommend_channel(networks):
     usable_networks = [
         network for network in networks
         if network.get("band") == "2.4 GHz" and isinstance(network.get("channel"), int)
+        and not (connected_bssid and str(network.get("bssid", "")).strip().casefold()
+                 == str(connected_bssid).strip().casefold())
     ]
     if not usable_networks:
         return {

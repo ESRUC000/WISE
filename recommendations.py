@@ -43,25 +43,30 @@ def get_security_recommendation(network):
     return recommendations
 
 
-def get_channel_recommendation(network, environment):
+def get_channel_recommendation(network, environment, is_connected=False):
 
     recommendations = []
 
-    status = network["channel_status"]
+    if not is_connected:
+        return recommendations
 
-    if status == "Overlapping" and environment.get("recommended_channel") is not None:
+    current_channel = network.get("channel")
+    channel_scores = environment.get("channel_scores", {})
+    recommended_channel = environment.get("recommended_channel")
+    if current_channel in channel_scores and recommended_channel is not None and current_channel != recommended_channel \
+            and channel_scores[recommended_channel] < channel_scores[current_channel]:
         recommendations.append(
-            f"Change your router to channel {environment['recommended_channel']} to reduce interference."
+            f"Change your router to channel {recommended_channel} to reduce interference."
         )
-
-    elif status in ["Recommended", "Good", "Excellent"]:
+    elif current_channel in channel_scores and recommended_channel == current_channel:
         recommendations.append(
-            "No channel changes are currently recommended."
+            "Your connected channel currently has the lowest estimated congestion."
         )
-
-    else:
+    elif network.get("channel_status") == "Overlapping" and recommended_channel is not None:
+        recommendations.append(f"Consider channel {recommended_channel} to reduce overlap.")
+    elif current_channel is None:
         recommendations.append(
-            "Unable to determine whether a channel change is needed."
+            "Connected channel information is unavailable; no channel change is recommended."
         )
 
     return recommendations
@@ -113,9 +118,11 @@ def get_performance_recommendation(network):
     return recommendations
 
 
-def get_band_recommendation(network, networks):
+def get_band_recommendation(network, networks, is_connected=False):
 
     recommendations = []
+    if not is_connected:
+        return recommendations
 
     # -----------------------------
     # Currently on 2.4 GHz
@@ -204,18 +211,21 @@ def get_band_recommendation(network, networks):
     return recommendations
 
 
-def analyze(network, environment, networks):
+def analyze(network, environment, networks, is_connected=False):
 
     network["performance_recommendations"] = \
-        get_performance_recommendation(network)
+        get_performance_recommendation(network) if is_connected else []
 
     network["security_recommendations"] = \
         get_security_recommendation(network)
 
     network["channel_advice"] = \
-        get_channel_recommendation(network, environment)
+        get_channel_recommendation(network, environment, is_connected)
 
     network["band_recommendations"] = \
-        get_band_recommendation(network, networks)
+        get_band_recommendation(network, networks, is_connected)
+
+    if not is_connected:
+        network["security_recommendations"] = []
 
     return network

@@ -16,7 +16,7 @@ def get_channel_status(band, channel):
     # 5 GHz
     elif band == "5 GHz":
 
-        if 36 <= channel <= 165:
+        if 36 <= channel <= 177:
             return "Good"
 
         return "Unknown"

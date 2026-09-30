@@ -81,9 +81,34 @@ class Handler(BaseHTTPRequestHandler):
         uid = database.get_session_user_id(token)
         if uid is None:
             return self._send(401, {"error": "Session expired. Please log in again."})
+        if method == "GET" and path == "/session":
+            user = database.get_user(uid)
+            if user is None:
+                database.delete_session(token)
+                return self._send(401, {"error": "Account no longer exists. Please sign in again."})
+            return self._send(200, {"user": user})
         if method == "DELETE" and path == "/logout":
             database.delete_session(token)
             return self._send(200, {"logged_out": True})
+        if method == "POST" and path == "/password":
+            data = self._body()
+            database.change_user_password(
+                uid, str(data.get("current_password", "")),
+                str(data.get("new_password", "")), session_token=token,
+            )
+            return self._send(200, {"changed": True})
+        if method == "DELETE" and path == "/account":
+            data = self._body()
+            database.delete_user(uid, str(data.get("password", "")))
+            return self._send(200, {"deleted": True})
+        if method == "GET" and path == "/devices/latest":
+            return self._send(200, database.latest_device_snapshot(uid))
+        if method == "POST" and path == "/devices":
+            data = self._body()
+            snapshot = data.get("snapshot")
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("devices"), list):
+                raise ValueError("Request must include a device snapshot and device list.")
+            return self._send(200, database.save_device_snapshot(uid, snapshot))
         parts = path.strip("/").split("/")
         if parts[0] != "scans":
             return self._send(404, {"error": "Not found"})
@@ -99,7 +124,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data.get("score"), dict) or not required_score_fields.issubset(data["score"]):
                 raise ValueError("Request must include a complete score object.")
             return self._send(200, database.save_scan(
-                data["connection"], data["score"], data.get("update_id"), uid))
+                data["connection"], data["score"], data.get("update_id"), uid,
+                separate=bool(data.get("separate", False))))
         if method == "DELETE":
             done = (database.delete_all_scans(uid) if len(parts) == 1
                     else database.delete_scan(int(parts[1]), uid))
