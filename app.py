@@ -7,6 +7,7 @@ import csv
 from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import api_client as database
+import guest_storage
 from channel_check import get_channel_status
 from security_score import compare_scores, score_connection
 
@@ -63,6 +64,7 @@ class WiseApp(tk.Tk):
         self.bar_animation_ids = []
         self.closing = False
         self.user = None
+        self.guest_mode = False
 
         self.database_start_error = None
         try:
@@ -121,11 +123,13 @@ class WiseApp(tk.Tk):
         self._nav_button("history", "◷", "Scan history")
         self._nav_button("reports", "▤", "Reports")
         self._nav_button("account", "⚙", "Account settings")
-        self._nav_button("account", "⚙", "Account settings")
-        tk.Button(self.sidebar, text="  ↪     Log out", command=self.logout, anchor="w",
-                  relief="flat", bd=0, padx=15, pady=12, cursor="hand2", bg=NAVY,
-                  fg="#AFC0D6", activebackground=NAVY_2, activeforeground="white",
-                  font=("Segoe UI Semibold", 9)).pack(fill="x", padx=12, pady=2)
+        self.logout_button = tk.Button(
+            self.sidebar, text="  ↪     Log out", command=self.logout, anchor="w",
+            relief="flat", bd=0, padx=15, pady=12, cursor="hand2", bg=NAVY,
+            fg="#AFC0D6", activebackground=NAVY_2, activeforeground="white",
+            font=("Segoe UI Semibold", 9),
+        )
+        self.logout_button.pack(fill="x", padx=12, pady=2)
 
         spacer = tk.Frame(self.sidebar, bg=NAVY)
         spacer.pack(fill="both", expand=True)
@@ -169,7 +173,7 @@ class WiseApp(tk.Tk):
                         highlightbackground=LINE, highlightthickness=1)
         card.place(relx=.5, rely=.5, anchor="center", width=430)
         tk.Label(card, text="WISE", bg=SURFACE, fg=NAVY, font=("Segoe UI", 25, "bold")).pack(anchor="w")
-        tk.Label(card, text="Sign in to access your Wi-Fi scan history from the WISE server.", bg=SURFACE,
+        tk.Label(card, text="Sign in for server scan history, or continue as a guest to keep your data on this computer.", bg=SURFACE,
                  fg=MUTED, wraplength=340, justify="left", font=("Segoe UI", 9)).pack(anchor="w", pady=(5, 21))
         self.auth_server_var = tk.StringVar(value=database.SERVER_URL)
         self.auth_server_detail_var = tk.StringVar(value=f"Server: {database.SERVER_URL}")
@@ -214,6 +218,12 @@ class WiseApp(tk.Tk):
         self.auth_toggle = tk.Button(card, text="New here? Create an account", command=self._toggle_auth,
                                      bg=SURFACE, fg=BLUE, relief="flat", pady=10, cursor="hand2")
         self.auth_toggle.pack(anchor="center")
+        self.guest_button = tk.Button(
+            card, text="Continue as guest", command=self._continue_as_guest,
+            bg=SURFACE, fg=INK, activebackground=SURFACE_ALT, relief="solid", bd=1,
+            padx=12, pady=9, font=("Segoe UI Semibold", 9), cursor="hand2",
+        )
+        self.guest_button.pack(fill="x", pady=(3, 0))
         tk.Label(card, text="Passwords are stored as salted PBKDF2 hashes.", bg=SURFACE, fg=MUTED,
                  font=("Segoe UI", 8)).pack(anchor="center", pady=(5, 0))
         self.auth_username.bind("<Return>", lambda _event: self.auth_password.focus_set())
@@ -261,6 +271,7 @@ class WiseApp(tk.Tk):
             self.auth_error.set(str(error))
             return
         self.auth_submit.configure(state="disabled")
+        self.guest_button.configure(state="disabled")
 
         def authenticate():
             if registering:
@@ -273,12 +284,40 @@ class WiseApp(tk.Tk):
         self._run_api_task(authenticate, self._complete_login, self._auth_failed)
 
     def _complete_login(self, user):
+        self.guest_mode = False
+        self._open_workspace(user)
+
+    def _continue_as_guest(self):
+        try:
+            guest_storage.initialize_database()
+        except Exception as error:
+            self.auth_error.set(f"Local guest storage is unavailable: {error}")
+            return
+        self.guest_mode = True
+        self._open_workspace({"id": None, "username": "Guest"})
+
+    def _data_store(self):
+        return guest_storage if self.guest_mode else database
+
+    def _open_workspace(self, user):
         self.auth_submit.configure(state="normal")
+        self.guest_button.configure(state="normal")
         self.user = user
         self.auth_frame.pack_forget()
+        account_button = self.nav_buttons["account"]
+        if self.guest_mode:
+            account_button.pack_forget()
+            self.logout_button.configure(text="  ↪     Exit guest mode")
+        else:
+            if not account_button.winfo_manager():
+                account_button.pack(fill="x", before=self.logout_button, padx=12, pady=2)
+            self.logout_button.configure(text="  ↪     Log out")
         self.sidebar.pack(side="left", fill="y")
         self.main_area.pack(side="left", fill="both", expand=True)
-        self.status_var.set(f"Signed in as {user['username']}.")
+        self.status_var.set(
+            "Using guest mode. Your data is saved on this computer."
+            if self.guest_mode else f"Signed in as {user['username']}."
+        )
         self.refresh_history()
         self._load_latest_device_snapshot()
 
@@ -288,7 +327,7 @@ class WiseApp(tk.Tk):
             for item in self.device_tree.get_children():
                 self.device_tree.delete(item)
             if snapshot is None:
-                self.device_status_var.set("No saved device discovery for this account.")
+                self.device_status_var.set("No saved device discovery yet.")
                 return
             for device in snapshot.get("devices", []):
                 self.device_tree.insert("", "end", values=(
@@ -301,16 +340,19 @@ class WiseApp(tk.Tk):
                 f"via gateway {snapshot.get('gateway_ip') or 'unknown'}."
             )
 
-        self._run_api_task(database.latest_device_snapshot, loaded,
+        self._run_api_task(self._data_store().latest_device_snapshot, loaded,
                            lambda error: self.device_status_var.set(f"Could not load device history: {error}"))
 
     def _auth_failed(self, error):
         self.auth_submit.configure(state="normal")
+        self.guest_button.configure(state="normal")
         self.auth_error.set(str(error))
 
     def logout(self):
         self.api_generation += 1
-        database.logout()
+        if not self.guest_mode:
+            database.logout()
+        self.guest_mode = False
         self.user = None
         self.latest_scan_id = None
         self.connection = None
@@ -389,11 +431,14 @@ class WiseApp(tk.Tk):
     def start_device_discovery(self):
         self.device_scan_button.configure(state="disabled", text="Discovering...")
         self.device_status_var.set("Scanning the active IPv4 subnet. Administrator privileges may be required.")
+        store = self._data_store()
+        user_id = self.user["id"]
+        interface_name = (self.connection or {}).get("interface")
 
         def discover():
             from device_discovery import discover_devices
-            snapshot = discover_devices(interface_name=(self.connection or {}).get("interface"))
-            return database.save_device_snapshot(snapshot, user_id=self.user["id"])
+            snapshot = discover_devices(interface_name=interface_name)
+            return store.save_device_snapshot(snapshot, user_id=user_id)
 
         def discovered(result):
             self.latest_device_snapshot = result
@@ -428,6 +473,8 @@ class WiseApp(tk.Tk):
         self.nav_buttons[key] = button
 
     def show_page(self, page):
+        if page == "account" and self.guest_mode:
+            page = "dashboard"
         self.current_page = page
         targets = {
             "dashboard": self.dashboard,
@@ -1177,9 +1224,10 @@ class WiseApp(tk.Tk):
             score_snapshot = dict(self.score_info)
             update_id = self.latest_scan_id
             user_id = self.user["id"]
+            store = self._data_store()
             self._run_api_task(
-                lambda: database.save_scan(connection_snapshot, score_snapshot,
-                                           update_id=update_id, user_id=user_id),
+                lambda: store.save_scan(connection_snapshot, score_snapshot,
+                                         update_id=update_id, user_id=user_id),
                 lambda _saved: None,
                 lambda save_error: self.status_var.set(
                     f"Score saved, but detailed scan data could not be stored: {save_error}"
@@ -1259,13 +1307,14 @@ class WiseApp(tk.Tk):
         elif self.user is not None:
             connection_ref = self.connection
             user_id = self.user["id"]
+            store = self._data_store()
             ssid_key = str(connection.get("ssid", "")).strip().casefold()
 
             def load_previous_preferences():
-                rows = database.list_scans(user_id)
+                rows = store.list_scans(user_id)
                 previous = next((row for row in rows
                                  if str(row.get("ssid", "")).strip().casefold() == ssid_key), None)
-                return database.get_scan(previous["id"], user_id) if previous else None
+                return store.get_scan(previous["id"], user_id) if previous else None
 
             def restore_preferences(record):
                 if self.connection is not connection_ref:
@@ -1567,6 +1616,7 @@ class WiseApp(tk.Tk):
         score_snapshot = dict(self.score_info)
         update_id = self.latest_scan_id
         user_id = self.user["id"]
+        store = self._data_store()
 
         def saved_assessment(saved):
             if self.connection is not connection_ref:
@@ -1591,9 +1641,9 @@ class WiseApp(tk.Tk):
             )
 
         self._run_api_task(
-            lambda: database.save_scan(connection_snapshot, score_snapshot, update_id=update_id,
-                                       user_id=user_id,
-                                       separate=self.separate_scan_history_var.get()),
+            lambda: store.save_scan(connection_snapshot, score_snapshot, update_id=update_id,
+                                     user_id=user_id,
+                                     separate=self.separate_scan_history_var.get()),
             saved_assessment,
             save_failed,
         )
@@ -1620,9 +1670,10 @@ class WiseApp(tk.Tk):
         score_snapshot = dict(self.score_info)
         update_id = self.latest_scan_id
         user_id = self.user["id"]
+        store = self._data_store()
         self._run_api_task(
-            lambda: database.save_scan(connection_snapshot, score_snapshot,
-                                       update_id=update_id, user_id=user_id),
+            lambda: store.save_scan(connection_snapshot, score_snapshot,
+                                     update_id=update_id, user_id=user_id),
             lambda _saved: self.status_var.set("Nearby analysis saved."),
             lambda error: self.status_var.set(f"Nearby analysis could not be stored: {error}"),
         )
@@ -1632,6 +1683,7 @@ class WiseApp(tk.Tk):
             return
 
         user_id = self.user["id"]
+        store = self._data_store()
 
         def show_history(rows):
             if self.user is None or self.user["id"] != user_id:
@@ -1647,7 +1699,7 @@ class WiseApp(tk.Tk):
         def history_failed(error):
             self.status_var.set(f"Database error: {error}")
 
-        self._run_api_task(lambda: database.list_scans(user_id), show_history, history_failed)
+        self._run_api_task(lambda: store.list_scans(user_id), show_history, history_failed)
 
     def _render_history_rows(self):
         if not hasattr(self, "history_tree"):
@@ -1711,10 +1763,11 @@ class WiseApp(tk.Tk):
             return
         record_id = int(selected[0])
         user_id = self.user["id"]
+        store = self._data_store()
 
         def load_record():
-            record = database.get_scan(record_id, user_id)
-            rows = database.list_scans(user_id) if record is not None else []
+            record = store.get_scan(record_id, user_id)
+            rows = store.list_scans(user_id) if record is not None else []
             return record, rows
 
         def show_record(result):
@@ -1771,6 +1824,7 @@ class WiseApp(tk.Tk):
             return
         record_ids = {int(item) for item in selected}
         user_id = self.user["id"]
+        store = self._data_store()
 
         def deleted(_result):
             if self.latest_scan_id in record_ids:
@@ -1779,7 +1833,7 @@ class WiseApp(tk.Tk):
             self.status_var.set(f"Deleted {len(record_ids)} assessment{'s' if len(record_ids) != 1 else ''}.")
 
         self._run_api_task(
-            lambda: [database.delete_scan(record_id, user_id) for record_id in record_ids], deleted,
+            lambda: [store.delete_scan(record_id, user_id) for record_id in record_ids], deleted,
                            lambda error: messagebox.showerror(
                                "Delete failed", f"The saved assessment could not be deleted.\n\n{error}"
                            )
@@ -1787,6 +1841,7 @@ class WiseApp(tk.Tk):
 
     def delete_all_history(self):
         user_id = self.user["id"]
+        store = self._data_store()
 
         def confirm_clear(rows):
             if not rows:
@@ -1800,12 +1855,12 @@ class WiseApp(tk.Tk):
                 self.refresh_history()
                 self.status_var.set("Scan history cleared.")
 
-            self._run_api_task(lambda: database.delete_all_scans(user_id), cleared,
+            self._run_api_task(lambda: store.delete_all_scans(user_id), cleared,
                                lambda error: messagebox.showerror(
                                    "Clear failed", f"Scan history could not be cleared.\n\n{error}"
                                ))
 
-        self._run_api_task(lambda: database.list_scans(user_id), confirm_clear,
+        self._run_api_task(lambda: store.list_scans(user_id), confirm_clear,
                            lambda error: messagebox.showerror(
                                "History unavailable", f"WISE could not read scan history.\n\n{error}"
                            ))

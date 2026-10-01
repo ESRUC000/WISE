@@ -16,6 +16,7 @@ import conn_network
 import database
 import analyzer
 import api_client
+import guest_storage
 from channel_recommender import recommend_channel
 from fil_scanner import scan as scan_nearby
 from security_score import compare_scores, score_connection
@@ -504,6 +505,47 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(record["network_key"], "ssid:office wi-fi")
         self.assertEqual(record["score_details"]["total"], 60)
         self.assertEqual(len(record["score_details"]["breakdown"]), 3)
+
+
+class GuestStorageTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_path = guest_storage.DATABASE_PATH
+        guest_storage.DATABASE_PATH = Path(self.temp_dir.name) / "guest_scans.db"
+        guest_storage.initialize_database()
+
+    def tearDown(self):
+        guest_storage.DATABASE_PATH = self.original_path
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _score(total):
+        return {"total": total, "protocol": 40, "company_and_password": 10, "other": total - 50}
+
+    def test_guest_scan_history_persists_and_can_be_managed(self):
+        connection = {"ssid": "Guest Wi-Fi", "authentication": "WPA2-Personal"}
+        saved = guest_storage.save_scan(connection, self._score(70))
+        updated = guest_storage.save_scan(connection, self._score(80))
+
+        self.assertEqual(updated["id"], saved["id"])
+        self.assertEqual(updated["previous"]["score"], 70)
+        record = guest_storage.get_scan(saved["id"])
+        self.assertEqual(record["score"], 80)
+        self.assertEqual(record["connection"], connection)
+        self.assertEqual(len(guest_storage.list_scans()), 1)
+        self.assertTrue(guest_storage.delete_scan(saved["id"]))
+        self.assertEqual(guest_storage.delete_all_scans(), 0)
+
+    def test_guest_device_snapshots_persist_locally(self):
+        snapshot = {
+            "interface": "Wi-Fi", "subnet": "192.168.1.0/24", "gateway_ip": "192.168.1.1",
+            "devices": [{"ip": "192.168.1.2", "mac": "aa:bb", "is_gateway": False}],
+        }
+        guest_storage.save_device_snapshot(snapshot)
+        latest = guest_storage.latest_device_snapshot()
+        self.assertEqual(latest["subnet"], snapshot["subnet"])
+        self.assertEqual(latest["devices"][0]["mac"], "aa:bb")
+        self.assertFalse(latest["devices"][0]["is_new"])
 
 
 class ApiClientTests(unittest.TestCase):
