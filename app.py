@@ -112,10 +112,7 @@ class WiseApp(tk.Tk):
         brand.pack(fill="x")
         mark = tk.Canvas(brand, width=34, height=34, bg=NAVY, highlightthickness=0)
         mark.pack(side="left")
-        mark.create_oval(2, 2, 32, 32, fill=BLUE, outline="")
-        mark.create_arc(9, 9, 25, 25, start=35, extent=110, style="arc", outline="white", width=2)
-        mark.create_arc(6, 6, 28, 28, start=35, extent=110, style="arc", outline="#AFCBFF", width=2)
-        tk.Label(brand, text="WISE", bg=NAVY, fg="white", font=("Segoe UI", 17, "bold")).pack(side="left", padx=(10, 0))
+        tk.Label(brand, text="WISE", bg=NAVY, fg="white", font=("Segoe UI", 20, "bold")).pack(side="left", padx=(9, 0))
         tk.Label(self.sidebar, text="WI-FI SECURITY", bg=NAVY, fg="#8293AA",
                  font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=23, pady=(16, 9))
 
